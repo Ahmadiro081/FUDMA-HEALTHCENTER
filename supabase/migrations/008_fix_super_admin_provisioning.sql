@@ -1,13 +1,16 @@
 -- =============================================================================
--- FUDMA HEALTHCENTER: Super Admin Provisioning & Trigger Repair Migration
+-- FUDMA HEALTHCENTER: Atomic Super Admin Provisioning & Trigger Repair Migration
 -- Migration: 008_fix_super_admin_provisioning.sql
 -- Purpose:
 --   1. Idempotently ensure normalize_matric_number, user_roles & notifications
 --      CHECK constraints, and privileged_accounts registry exist cleanly
---   2. Ensure public.is_service_context() stays SECURITY INVOKER (never SECURITY DEFINER)
+--   2. Preserve public.is_service_context() as SECURITY INVOKER (never SECURITY DEFINER)
 --   3. Repair public.handle_new_user() and protection triggers so GoTrue
 --      auth.admin.createUser() succeeds cleanly without trigger blocks
---   4. Output diagnostic status at the end when executed in Supabase SQL Editor
+--   4. Provide atomic service_role-only rpc_finalize_super_admin_provision()
+--      so profile, super_admin role, privileged_accounts, and audit log commit
+--      together inside one serialized PostgreSQL transaction
+--   5. Preserve Group 11 whitelist enforcement, RLS, and Super Admin immutability
 -- Safe & idempotent to run after 001..007 migrations.
 -- =============================================================================
 
@@ -76,7 +79,7 @@ AS $$
       OR current_user IN ('postgres', 'supabase_admin');
 $$;
 
--- 4. Ensure privileged_accounts table & immutability helpers exist
+-- 4. Ensure privileged_accounts table, RLS & immutability helpers exist
 CREATE TABLE IF NOT EXISTS public.privileged_accounts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE RESTRICT,
@@ -99,6 +102,16 @@ CREATE POLICY "Only super_admin reads privileged accounts"
   ON public.privileged_accounts FOR SELECT
   USING (public.get_my_role() = 'super_admin');
 
+CREATE OR REPLACE FUNCTION public.is_admin_or_super()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(public.get_my_role(), '') IN ('admin', 'super_admin');
+$$;
+
 CREATE OR REPLACE FUNCTION public.is_super_admin()
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -109,7 +122,39 @@ AS $$
   SELECT COALESCE(public.get_my_role(), '') = 'super_admin';
 $$;
 
--- 5. Ensure user_roles protection trigger allows server-side service_role and initial 'patient' inserts
+CREATE OR REPLACE FUNCTION public.is_protected_super_admin(p_user_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = p_user_id AND role = 'super_admin'
+  ) OR EXISTS (
+    SELECT 1 FROM public.privileged_accounts
+    WHERE user_id = p_user_id
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.trg_fn_protect_privileged_accounts()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Privileged Super Admin account registry entries are immutable and cannot be modified or deleted.';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_privileged_accounts ON public.privileged_accounts;
+CREATE TRIGGER trg_protect_privileged_accounts
+  BEFORE UPDATE OR DELETE ON public.privileged_accounts
+  FOR EACH ROW EXECUTE FUNCTION public.trg_fn_protect_privileged_accounts();
+
+-- 5. Ensure user_roles & profiles protection triggers preserve Super Admin immutability
 CREATE OR REPLACE FUNCTION public.trg_fn_protect_user_roles()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -170,6 +215,70 @@ DROP TRIGGER IF EXISTS trg_protect_user_roles ON public.user_roles;
 CREATE TRIGGER trg_protect_user_roles
   BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles
   FOR EACH ROW EXECUTE FUNCTION public.trg_fn_protect_user_roles();
+
+CREATE OR REPLACE FUNCTION public.trg_fn_protect_profiles()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_is_svc BOOLEAN := public.is_service_context();
+  v_actor_role TEXT := COALESCE(public.get_my_role(), '');
+  v_target_role TEXT;
+  v_target_is_super BOOLEAN;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF public.is_protected_super_admin(OLD.id) THEN
+      RAISE EXCEPTION 'The Super Admin profile is protected and cannot be deleted.';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  v_target_is_super := public.is_protected_super_admin(OLD.id);
+  IF v_target_is_super THEN
+    IF NEW.is_active = FALSE THEN
+      RAISE EXCEPTION 'The Super Admin account cannot be suspended or deactivated.';
+    END IF;
+    IF NOT v_is_svc AND auth.uid() IS DISTINCT FROM OLD.id THEN
+      RAISE EXCEPTION 'No ordinary administrator or student may modify the Super Admin account.';
+    END IF;
+    IF NOT v_is_svc AND NEW.email IS DISTINCT FROM OLD.email THEN
+      RAISE EXCEPTION 'Email address cannot be modified directly.';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF v_is_svc OR v_actor_role = 'super_admin' THEN
+    RETURN NEW;
+  END IF;
+
+  IF v_actor_role = 'admin' THEN
+    SELECT role INTO v_target_role FROM public.user_roles WHERE user_id = OLD.id;
+    IF v_target_role = 'admin' AND NEW.is_active IS DISTINCT FROM OLD.is_active THEN
+      RAISE EXCEPTION 'Only the Super Administrator may suspend or reactivate administrator accounts.';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.is_active IS DISTINCT FROM OLD.is_active THEN
+    RAISE EXCEPTION 'Only an administrator may change account activation status.';
+  END IF;
+  IF NEW.email IS DISTINCT FROM OLD.email THEN
+    RAISE EXCEPTION 'Email address cannot be modified directly.';
+  END IF;
+  IF NEW.full_name IS DISTINCT FROM OLD.full_name
+     AND EXISTS (SELECT 1 FROM public.group11_student_whitelist WHERE registered_user_id = OLD.id) THEN
+    RAISE EXCEPTION 'Verified Group 11 student full name cannot be modified after registration.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_profiles ON public.profiles;
+CREATE TRIGGER trg_protect_profiles
+  BEFORE UPDATE OR DELETE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.trg_fn_protect_profiles();
 
 -- 6. Repair handle_new_user() so server-side Admin API provisioning never fails inside GoTrue
 CREATE OR REPLACE FUNCTION public.handle_new_user()
@@ -349,15 +458,132 @@ CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- 7. Diagnostic verification summary (displayed in Supabase SQL Editor)
+-- 7. Atomic service_role-only finalizer for initial Super Admin provisioning
+--    Commits profiles, super_admin user_role, privileged_accounts, and audit log in ONE transaction.
+CREATE OR REPLACE FUNCTION public.rpc_finalize_super_admin_provision(
+  p_user_id UUID,
+  p_full_name TEXT,
+  p_email TEXT,
+  p_phone TEXT DEFAULT NULL,
+  p_login_username TEXT DEFAULT 'ENG/2012/0001',
+  p_account_type TEXT DEFAULT 'Privileged Administrative Account'
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_norm_username TEXT := public.normalize_matric_number(p_login_username);
+  v_email TEXT := LOWER(TRIM(COALESCE(p_email, '')));
+  v_full_name TEXT := TRIM(COALESCE(p_full_name, ''));
+BEGIN
+  IF NOT public.is_service_context() THEN
+    RAISE EXCEPTION 'Forbidden: Super Admin provisioning requires server-side service_role context.';
+  END IF;
+
+  IF p_user_id IS NULL OR v_full_name = '' OR v_email = '' THEN
+    RAISE EXCEPTION 'User ID, full name, and email are required for Super Admin provisioning.';
+  END IF;
+
+  IF v_norm_username <> 'ENG/2012/0001' THEN
+    RAISE EXCEPTION 'Initial Super Admin login username is restricted exclusively to ENG/2012/0001.';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('fudma_super_admin_provision'));
+
+  IF EXISTS (SELECT 1 FROM public.privileged_accounts)
+     OR EXISTS (SELECT 1 FROM public.user_roles WHERE role = 'super_admin') THEN
+    RAISE EXCEPTION 'Super Admin (ENG/2012/0001) has already been provisioned and cannot be duplicated.';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM public.group11_student_whitelist
+    WHERE public.normalize_matric_number(matric_number) = v_norm_username
+  ) THEN
+    RAISE EXCEPTION 'ENG/2012/0001 must never exist in group11_student_whitelist.';
+  END IF;
+
+  DELETE FROM public.patients WHERE profile_id = p_user_id;
+
+  INSERT INTO public.profiles (id, full_name, email, phone, address, is_active)
+  VALUES (
+    p_user_id,
+    v_full_name,
+    v_email,
+    NULLIF(TRIM(COALESCE(p_phone, '')), ''),
+    'FUDMA Healthcenter Executive Administration',
+    TRUE
+  )
+  ON CONFLICT (id) DO UPDATE SET
+    full_name = EXCLUDED.full_name,
+    email = EXCLUDED.email,
+    phone = EXCLUDED.phone,
+    address = EXCLUDED.address,
+    is_active = TRUE;
+
+  INSERT INTO public.user_roles (user_id, role, assigned_by)
+  VALUES (p_user_id, 'super_admin', p_user_id)
+  ON CONFLICT (user_id) DO UPDATE SET
+    role = 'super_admin',
+    assigned_by = p_user_id;
+
+  INSERT INTO public.privileged_accounts (
+    user_id, login_username, role, account_type, is_immutable
+  )
+  VALUES (
+    p_user_id,
+    v_norm_username,
+    'super_admin',
+    COALESCE(NULLIF(TRIM(p_account_type), ''), 'Privileged Administrative Account'),
+    TRUE
+  );
+
+  INSERT INTO public.activity_logs (
+    actor_id, actor_name, actor_role, action, entity_type, entity_id, details
+  )
+  VALUES (
+    p_user_id,
+    v_full_name,
+    'super_admin',
+    'SUPER_ADMIN_PROVISIONED',
+    'privileged_account',
+    v_norm_username,
+    'Initial Privileged Administrative Account (' || v_norm_username || ') provisioned atomically via server-side workflow.'
+  );
+
+  RETURN jsonb_build_object(
+    'ok', TRUE,
+    'user_id', p_user_id,
+    'login_username', v_norm_username,
+    'role', 'super_admin'
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_finalize_super_admin_provision(UUID, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.rpc_finalize_super_admin_provision(UUID, TEXT, TEXT, TEXT, TEXT, TEXT) TO service_role;
+
+-- 8. Diagnostic verification summary (displayed in Supabase SQL Editor)
 SELECT
   (SELECT COUNT(*) FROM auth.users WHERE LOWER(email) = 'ahmadcybro@gmail.com') AS auth_users_for_email,
   (SELECT COUNT(*) FROM public.profiles WHERE LOWER(email) = 'ahmadcybro@gmail.com') AS profiles_for_email,
   (SELECT COUNT(*) FROM public.user_roles WHERE role = 'super_admin') AS super_admin_roles,
   (SELECT COUNT(*) FROM public.privileged_accounts) AS privileged_accounts,
+  (SELECT COUNT(*) FROM public.group11_student_whitelist) AS group11_whitelist_count,
   (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE proname = 'handle_new_user' AND pronamespace = 'public'::regnamespace) AS handle_new_user_owner,
   (SELECT string_agg(t.tgname, ', ')
    FROM pg_trigger t
    JOIN pg_class c ON c.oid = t.tgrelid
    JOIN pg_namespace n ON n.oid = c.relnamespace
-   WHERE n.nspname = 'auth' AND c.relname = 'users' AND NOT t.tgisinternal) AS auth_users_triggers;
+   WHERE n.nspname = 'auth' AND c.relname = 'users' AND NOT t.tgisinternal) AS auth_users_triggers,
+  (SELECT string_agg(t.tgname, ', ')
+   FROM pg_trigger t
+   JOIN pg_class c ON c.oid = t.tgrelid
+   JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public' AND c.relname = 'profiles' AND NOT t.tgisinternal) AS profiles_triggers,
+  (SELECT string_agg(t.tgname, ', ')
+   FROM pg_trigger t
+   JOIN pg_class c ON c.oid = t.tgrelid
+   JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public' AND c.relname = 'user_roles' AND NOT t.tgisinternal) AS user_roles_triggers;

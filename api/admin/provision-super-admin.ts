@@ -398,26 +398,8 @@ export async function executeSupabaseSuperAdminProvision(
   const createdUserId = createdAuth.user.id;
 
   try {
-    // Ensure no patient row is left behind if an earlier migration trigger inserted one
-    const { error: delPatErr } = await supabaseAdmin
-      .from('patients')
-      .delete()
-      .eq('profile_id', createdUserId);
-    if (delPatErr) throw new Error(delPatErr.message);
-
-    const { error: profErr } = await supabaseAdmin.from('profiles').upsert(
-      {
-        id: createdUserId,
-        full_name: fullName,
-        email,
-        phone,
-        address: 'FUDMA Healthcenter Executive Administration',
-        is_active: true,
-      },
-      { onConflict: 'id' }
-    );
-    if (profErr) throw new Error(profErr.message);
-
+    // Update Auth app_metadata to 'super_admin_provision' before DB promotion
+    // so if metadata update fails, user_roles is still 'patient' and deleteUser rolls back cleanly.
     const { error: metaErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
       app_metadata: {
         account_origin: 'super_admin_provision',
@@ -427,42 +409,32 @@ export async function executeSupabaseSuperAdminProvision(
     });
     if (metaErr) throw new Error(metaErr.message);
 
-    const { error: roleErr } = await supabaseAdmin.from('user_roles').upsert(
+    // Atomically finalize profiles, super_admin user_role, privileged_accounts, and activity_logs
+    // inside one PostgreSQL transaction serialized by pg_advisory_xact_lock.
+    const { data: rpcResult, error: rpcErr } = await supabaseAdmin.rpc(
+      'rpc_finalize_super_admin_provision',
       {
-        user_id: createdUserId,
-        role: SUPER_ADMIN_ROLE,
-        assigned_by: createdUserId,
-      },
-      { onConflict: 'user_id' }
+        p_user_id: createdUserId,
+        p_full_name: fullName,
+        p_email: email,
+        p_phone: phone,
+        p_login_username: SUPER_ADMIN_USERNAME,
+        p_account_type: SUPER_ADMIN_ACCOUNT_TYPE,
+      }
     );
-    if (roleErr) {
-      const hint = roleErr.message.toLowerCase().includes('check constraint')
-        ? ' Run supabase/migrations/006_super_admin.sql and 008_fix_super_admin_provisioning.sql in Supabase SQL Editor.'
-        : '';
-      throw new Error(`${roleErr.message}${hint}`);
+
+    if (rpcErr) {
+      const lowerRpc = rpcErr.message.toLowerCase();
+      if (
+        lowerRpc.includes('could not find the function') ||
+        lowerRpc.includes('does not exist')
+      ) {
+        throw new Error(
+          'Atomic finalizer rpc_finalize_super_admin_provision is missing. Run supabase/migrations/008_fix_super_admin_provisioning.sql in your Supabase SQL Editor.'
+        );
+      }
+      throw new Error(rpcErr.message);
     }
-
-    const { error: privErr } = await supabaseAdmin.from('privileged_accounts').insert({
-      user_id: createdUserId,
-      login_username: SUPER_ADMIN_USERNAME,
-      role: SUPER_ADMIN_ROLE,
-      account_type: SUPER_ADMIN_ACCOUNT_TYPE,
-      is_immutable: true,
-    });
-    if (privErr) throw new Error(privErr.message);
-
-    await supabaseAdmin
-      .from('activity_logs')
-      .insert({
-        actor_id: createdUserId,
-        actor_name: fullName,
-        actor_role: SUPER_ADMIN_ROLE,
-        action: 'SUPER_ADMIN_PROVISIONED',
-        entity_type: 'privileged_account',
-        entity_id: SUPER_ADMIN_USERNAME,
-        details: `Initial Privileged Administrative Account (${SUPER_ADMIN_USERNAME}) provisioned via secure server-side workflow.`,
-      })
-      .then(() => {}, () => {});
 
     return {
       status: 201,
@@ -472,6 +444,7 @@ export async function executeSupabaseSuperAdminProvision(
         login_username: SUPER_ADMIN_USERNAME,
         role: SUPER_ADMIN_ROLE,
         account_type: SUPER_ADMIN_ACCOUNT_TYPE,
+        ...(typeof rpcResult === 'object' && rpcResult !== null ? rpcResult : {}),
       },
     };
   } catch (err) {
