@@ -14,14 +14,21 @@ import {
 import { getRoleDashboardPath, useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 
-const DEMO_ACCOUNTS = [
-  { role: 'Patient', email: 'patient@fudma.edu.ng', pass: 'Fudma@2026' },
-  { role: 'Nursing Station', email: 'nurse@fudma.edu.ng', pass: 'Fudma@2026' },
-  { role: 'Consultant / Doctor', email: 'doctor@fudma.edu.ng', pass: 'Fudma@2026' },
-  { role: 'Medical Laboratory', email: 'lab@fudma.edu.ng', pass: 'Fudma@2026' },
-  { role: 'Hospital Pharmacy', email: 'pharmacy@fudma.edu.ng', pass: 'Fudma@2026' },
-  { role: 'System Administrator', email: 'admin@fudma.edu.ng', pass: 'Fudma@2026' },
-];
+declare const __DEV_DEMO_ACCOUNTS__: boolean;
+
+const SHOW_DEV_DEMO_ACCOUNTS =
+  typeof __DEV_DEMO_ACCOUNTS__ !== 'undefined' && __DEV_DEMO_ACCOUNTS__ && import.meta.env.DEV;
+
+const DEMO_ACCOUNTS = SHOW_DEV_DEMO_ACCOUNTS
+  ? [
+      { role: 'Patient', email: 'patient@fudma.edu.ng', pass: 'Fudma@2026' },
+      { role: 'Nursing Station', email: 'nurse@fudma.edu.ng', pass: 'Fudma@2026' },
+      { role: 'Consultant / Doctor', email: 'doctor@fudma.edu.ng', pass: 'Fudma@2026' },
+      { role: 'Medical Laboratory', email: 'lab@fudma.edu.ng', pass: 'Fudma@2026' },
+      { role: 'Hospital Pharmacy', email: 'pharmacy@fudma.edu.ng', pass: 'Fudma@2026' },
+      { role: 'System Administrator', email: 'admin@fudma.edu.ng', pass: 'Fudma@2026' },
+    ]
+  : [];
 
 export function LoginPage() {
   const { login } = useAuth();
@@ -146,40 +153,42 @@ export function LoginPage() {
           </div>
         </div>
 
-        {/* Academic Demo Credentials Helper */}
-        <div className="mt-4 rounded-xl border border-slate-200 bg-white overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setShowDemos((v) => !v)}
-            className="w-full px-4 py-3 flex items-center justify-between text-xs font-semibold text-slate-700 hover:bg-slate-50"
-          >
-            <span>Academic Demonstration Accounts (6 Portals)</span>
-            {showDemos ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </button>
-          {showDemos && (
-            <div className="px-4 pb-4 pt-1 border-t border-slate-100 space-y-2">
-              <p className="text-[11px] text-slate-500">
-                Click any role below to fill credentials, then click Sign In.
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {DEMO_ACCOUNTS.map((acc) => (
-                  <button
-                    key={acc.email}
-                    type="button"
-                    onClick={() => {
-                      setEmail(acc.email);
-                      setPassword(acc.pass);
-                    }}
-                    className="text-left rounded-lg border border-slate-200 px-3 py-2 hover:border-[#0369A1] hover:bg-sky-50/50 transition-colors"
-                  >
-                    <p className="text-xs font-semibold text-slate-900">{acc.role}</p>
-                    <p className="text-[11px] font-mono text-slate-500 truncate">{acc.email}</p>
-                  </button>
-                ))}
+        {/* Academic Demo Credentials Helper (Development builds only) */}
+        {SHOW_DEV_DEMO_ACCOUNTS && (
+          <div className="mt-4 rounded-xl border border-slate-200 bg-white overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setShowDemos((v) => !v)}
+              className="w-full px-4 py-3 flex items-center justify-between text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              <span>Academic Demonstration Accounts (6 Portals)</span>
+              {showDemos ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {showDemos && (
+              <div className="px-4 pb-4 pt-1 border-t border-slate-100 space-y-2">
+                <p className="text-[11px] text-slate-500">
+                  Development preview only. Click any role below to fill credentials, then click Sign In.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {DEMO_ACCOUNTS.map((acc) => (
+                    <button
+                      key={acc.email}
+                      type="button"
+                      onClick={() => {
+                        setEmail(acc.email);
+                        setPassword(acc.pass);
+                      }}
+                      className="text-left rounded-lg border border-slate-200 px-3 py-2 hover:border-[#0369A1] hover:bg-sky-50/50 transition-colors"
+                    >
+                      <p className="text-xs font-semibold text-slate-900">{acc.role}</p>
+                      <p className="text-[11px] font-mono text-slate-500 truncate">{acc.email}</p>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -509,25 +518,23 @@ export function ResetPasswordPage() {
   const navigate = useNavigate();
 
   const [email, setEmail] = useState('');
-  const [verification, setVerification] = useState('');
-  const [newPassword, setNewPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    if (!email.trim()) {
+      setError('Please enter your registered email address.');
+      return;
+    }
     setSubmitting(true);
     try {
-      const msg = await resetPassword({
-        email: email.trim(),
-        new_password: newPassword,
-        hospital_or_staff_check: verification.trim() || undefined,
-      });
+      const msg = await resetPassword(email.trim());
       showToast(msg, 'success');
       navigate('/login');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to reset password.');
+      setError(err instanceof Error ? err.message : 'Unable to send password recovery link.');
     } finally {
       setSubmitting(false);
     }
@@ -545,65 +552,65 @@ export function ResetPasswordPage() {
         </Link>
 
         <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8">
-          <h1 className="text-xl font-bold text-slate-900">Reset Account Password</h1>
-          <p className="mt-1 text-xs text-slate-500">
-            Verify your email and hospital/phone identifier to set a new password.
-          </p>
+          <h1 className="text-xl font-bold text-slate-900">Account Password Recovery</h1>
 
-          {error && (
-            <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
-              {error}
+          {authMode === 'local' ? (
+            <div className="mt-4 space-y-4">
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 space-y-2">
+                <p className="font-semibold">Self-Service Password Reset Disabled</p>
+                <p>
+                  Direct password resets are disabled in standalone mode to protect patient and
+                  clinical accounts from unauthorized changes.
+                </p>
+                <p>
+                  To recover your account, please contact the FUDMA Healthcenter System
+                  Administrator or ICT Clinic Desk with your valid university/hospital ID, or
+                  enable verified email recovery via Supabase Auth.
+                </p>
+              </div>
+              <Link
+                to="/login"
+                className="w-full inline-flex items-center justify-center rounded-lg bg-[#0F4C81] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#0369A1] transition-colors"
+              >
+                Return to Sign In
+              </Link>
             </div>
-          )}
+          ) : (
+            <>
+              <p className="mt-1 text-xs text-slate-500">
+                Enter your registered email address to receive a verified password recovery link.
+              </p>
 
-          <form onSubmit={handleSubmit} className="mt-5 space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Registered Email *</label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@fudma.edu.ng"
-                className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
-              />
-            </div>
-            {authMode === 'local' && (
-              <>
+              {error && (
+                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
+                  {error}
+                </div>
+              )}
+
+              <form onSubmit={handleSubmit} className="mt-5 space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Phone Number or Matric/Hospital ID
+                    Registered Email *
                   </label>
                   <input
-                    type="text"
-                    value={verification}
-                    onChange={(e) => setVerification(e.target.value)}
-                    placeholder="e.g., CSC/2022/0184 or last 4 phone digits"
-                    className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">New Password *</label>
-                  <input
-                    type="password"
+                    type="email"
                     required
-                    minLength={6}
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Minimum 6 characters"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="name@fudma.edu.ng"
                     className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
                   />
                 </div>
-              </>
-            )}
-            <button
-              type="submit"
-              disabled={submitting}
-              className="w-full rounded-lg bg-[#0F4C81] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#0369A1] disabled:opacity-60 transition-colors"
-            >
-              {submitting ? 'Updating Password...' : 'Reset Password'}
-            </button>
-          </form>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="w-full rounded-lg bg-[#0F4C81] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#0369A1] disabled:opacity-60 transition-colors"
+                >
+                  {submitting ? 'Sending Recovery Link...' : 'Send Recovery Email'}
+                </button>
+              </form>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -3,6 +3,7 @@ import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import dotenv from 'dotenv';
 import {
+  DEMO_USER_IDS,
   addActivityLog,
   addNotification,
   enrichDoctor,
@@ -13,24 +14,62 @@ import {
   verifyPassword,
   type StoredUser,
 } from './server/db.ts';
-import type { AuthUser, UserRole } from './src/types/hospital.ts';
+import type {
+  AppointmentStatus,
+  AuthUser,
+  LabStatus,
+  PrescriptionStatus,
+  UserRole,
+} from './src/types/hospital.ts';
 
 dotenv.config();
 
 const PORT = Number(process.env.PORT || 3000);
-const SESSION_SECRET = process.env.SESSION_SECRET || 'fudma-healthcenter-dev-secret-key-2026';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const PLACEHOLDER_SECRETS = new Set([
+  'change-this-to-a-long-random-string-in-production',
+  'fudma-healthcenter-dev-secret-key-2026',
+  'secret',
+  'dev-secret',
+]);
+
+function resolveSessionSecret(): string {
+  const configured = process.env.SESSION_SECRET?.trim();
+  if (IS_PRODUCTION) {
+    if (!configured || PLACEHOLDER_SECRETS.has(configured) || configured.length < 32) {
+      console.error(
+        '[SECURITY FATAL] SESSION_SECRET must be configured with at least 32 random characters in production.'
+      );
+      process.exit(1);
+    }
+    return configured;
+  }
+  if (configured && !PLACEHOLDER_SECRETS.has(configured) && configured.length >= 16) {
+    return configured;
+  }
+  console.warn(
+    '[SECURITY WARNING] SESSION_SECRET is not set; using an ephemeral random secret for this development process.'
+  );
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const SESSION_SECRET = resolveSessionSecret();
+const SESSION_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
 
 interface TokenPayload {
   sub: string;
   role: UserRole;
+  iat: number;
   exp: number;
 }
 
 function signToken(user: StoredUser): string {
+  const now = Date.now();
   const payload: TokenPayload = {
     sub: user.id,
     role: user.role,
-    exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
+    iat: now,
+    exp: now + SESSION_TTL_MS,
   };
   const encoded = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
@@ -49,11 +88,32 @@ function verifyToken(token: string): TokenPayload | null {
       return null;
     }
     const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8')) as TokenPayload;
-    if (payload.exp < Date.now()) return null;
+    if (!payload.sub || !payload.role || typeof payload.exp !== 'number' || payload.exp < Date.now()) {
+      return null;
+    }
     return payload;
   } catch {
     return null;
   }
+}
+
+function setSessionCookie(res: Response, token: string): void {
+  res.cookie('fudma_token', token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION,
+    path: '/',
+    maxAge: SESSION_TTL_MS,
+  });
+}
+
+function clearSessionCookie(res: Response): void {
+  res.clearCookie('fudma_token', {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION,
+    path: '/',
+  });
 }
 
 function getTokenFromRequest(req: Request): string | null {
@@ -77,6 +137,15 @@ interface AuthedRequest extends Request {
   currentUser?: StoredUser;
 }
 
+function isDisallowedDemoUserInProd(user: StoredUser): boolean {
+  if (!IS_PRODUCTION) return false;
+  if (DEMO_USER_IDS.has(user.id)) {
+    if (user.role === 'admin') return true;
+    if (verifyPassword('Fudma@2026', user.password_hash)) return true;
+  }
+  return false;
+}
+
 function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
   const token = getTokenFromRequest(req);
   if (!token) {
@@ -92,6 +161,14 @@ function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): voi
   const user = db.users.find((u) => u.id === payload.sub);
   if (!user || !user.is_active) {
     res.status(403).json({ error: 'Account is inactive or unavailable.' });
+    return;
+  }
+  if (user.role !== payload.role) {
+    res.status(401).json({ error: 'Session role changed. Please sign in again.' });
+    return;
+  }
+  if (isDisallowedDemoUserInProd(user)) {
+    res.status(403).json({ error: 'Demonstration accounts are disabled in production.' });
     return;
   }
   req.currentUser = user;
@@ -144,15 +221,150 @@ function nextCode(prefix: string, existingCodes: string[]): string {
   return `${prefix}-${year}-${maxNum + 1}`;
 }
 
+function createRateLimiter(opts: {
+  windowMs: number;
+  max: number;
+  keyFn: (req: Request) => string;
+  message: string;
+}) {
+  const hits = new Map<string, number[]>();
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const now = Date.now();
+    const cutoff = now - opts.windowMs;
+    if (hits.size > 5000) {
+      for (const [k, timestamps] of hits.entries()) {
+        const recent = timestamps.filter((t) => t > cutoff);
+        if (recent.length === 0) hits.delete(k);
+        else hits.set(k, recent);
+      }
+    }
+    const key = opts.keyFn(req);
+    const recent = (hits.get(key) || []).filter((t) => t > cutoff);
+    if (recent.length >= opts.max) {
+      const retrySec = Math.max(1, Math.ceil((recent[0] + opts.windowMs - now) / 1000));
+      res.setHeader('Retry-After', String(retrySec));
+      res.status(429).json({ error: opts.message });
+      return;
+    }
+    recent.push(now);
+    hits.set(key, recent);
+    next();
+  };
+}
+
+const VALID_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const VALID_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const VALID_TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
+const CLINIC_TIME_SLOTS = new Set([
+  '08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
+  '12:00', '12:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30',
+  '16:00', '16:30', '17:00', '17:30',
+]);
+const ALLOWED_GENDERS = new Set(['Male', 'Female', 'Other']);
+const ALLOWED_CATEGORIES = new Set(['Student', 'Staff', 'Dependent', 'Community']);
+const ALLOWED_BLOOD_GROUPS = new Set(['Unknown', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']);
+const ALLOWED_GENOTYPES = new Set(['Unknown', 'AA', 'AS', 'SS', 'AC', 'SC']);
+const ALLOWED_PRIORITIES = new Set(['Normal', 'Urgent', 'Emergency']);
+const ALLOWED_URGENCIES = new Set(['Routine', 'Urgent', 'Stat']);
+const ALLOWED_INTERPRETATIONS = new Set(['Normal', 'Abnormal', 'Critical']);
+
+const ALLOWED_APPOINTMENT_TRANSITIONS: Record<AppointmentStatus, AppointmentStatus[]> = {
+  Booked: ['Approved', 'Checked In', 'Waiting', 'Cancelled', 'Rescheduled'],
+  Approved: ['Checked In', 'Waiting', 'Cancelled', 'Rescheduled'],
+  Rescheduled: ['Approved', 'Checked In', 'Waiting', 'Cancelled', 'Rescheduled'],
+  'Checked In': ['Waiting', 'In Consultation', 'Cancelled'],
+  Waiting: ['In Consultation', 'Checked In', 'Cancelled'],
+  'In Consultation': ['Completed', 'Waiting'],
+  Completed: [],
+  Cancelled: [],
+};
+
+const ALLOWED_LAB_TRANSITIONS: Record<LabStatus, LabStatus[]> = {
+  Pending: ['Sample Collected', 'Processing', 'Completed'],
+  'Sample Collected': ['Processing', 'Completed'],
+  Processing: ['Completed'],
+  Completed: ['Completed', 'Reviewed'],
+  Reviewed: [],
+};
+
+const ALLOWED_PRESCRIPTION_TRANSITIONS: Record<PrescriptionStatus, PrescriptionStatus[]> = {
+  Pending: ['Available', 'Partially Dispensed', 'Dispensed', 'Unavailable'],
+  Available: ['Partially Dispensed', 'Dispensed', 'Unavailable'],
+  'Partially Dispensed': ['Available', 'Partially Dispensed', 'Dispensed', 'Unavailable'],
+  Unavailable: ['Available', 'Partially Dispensed', 'Dispensed'],
+  Dispensed: [],
+};
+
+function isValidCalendarDate(dateStr: string): boolean {
+  if (!VALID_DATE_REGEX.test(dateStr)) return false;
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+function getClientIp(req: Request): string {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
 async function startServer(): Promise<void> {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+
+  // Baseline security headers
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('X-XSS-Protection', '0');
+    if (IS_PRODUCTION) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+      );
+    }
+    next();
+  });
+
+  app.use(express.json({ limit: '1mb' }));
+
+  const loginLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    keyFn: (req) => `${getClientIp(req)}:${String(req.body?.email || '').trim().toLowerCase()}`,
+    message: 'Too many sign-in attempts for this account. Please wait 15 minutes and try again.',
+  });
+
+  const loginIpLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    keyFn: (req) => `ip:${getClientIp(req)}`,
+    message: 'Too many sign-in attempts from this network address. Please try again later.',
+  });
+
+  const resetLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    keyFn: (req) => `reset:${getClientIp(req)}`,
+    message: 'Too many password recovery requests. Please try again later.',
+  });
+
+  const registerLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    max: 15,
+    keyFn: (req) => `reg:${getClientIp(req)}`,
+    message: 'Too many registration attempts from this address. Please try again later.',
+  });
 
   // =========================================================================
   // AUTHENTICATION ENDPOINTS
   // =========================================================================
 
-  app.post('/api/auth/register', (req: Request, res: Response) => {
+  app.post('/api/auth/register', registerLimiter, (req: Request, res: Response) => {
     const {
       full_name,
       email,
@@ -169,19 +381,50 @@ async function startServer(): Promise<void> {
       allergies,
       emergency_contact_name,
       emergency_contact_phone,
+      role: requestedRole,
     } = req.body ?? {};
+
+    if (requestedRole !== undefined && requestedRole !== 'patient') {
+      res.status(403).json({ error: 'Public registration may only create patient accounts.' });
+      return;
+    }
 
     if (!full_name || !email || !password) {
       res.status(400).json({ error: 'Full name, email, and password are required.' });
       return;
     }
-    if (String(password).length < 6) {
-      res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (!VALID_EMAIL_REGEX.test(normalizedEmail)) {
+      res.status(400).json({ error: 'Please enter a valid email address.' });
+      return;
+    }
+    const passStr = String(password);
+    if (passStr.length < 6 || passStr.length > 128) {
+      res.status(400).json({ error: 'Password must be between 6 and 128 characters.' });
+      return;
+    }
+    if (['123456', 'password', 'qwerty'].includes(passStr.toLowerCase())) {
+      res.status(400).json({ error: 'Please choose a stronger password.' });
+      return;
+    }
+    if (gender && !ALLOWED_GENDERS.has(String(gender))) {
+      res.status(400).json({ error: 'Invalid gender selection.' });
+      return;
+    }
+    if (patient_category && !ALLOWED_CATEGORIES.has(String(patient_category))) {
+      res.status(400).json({ error: 'Invalid patient category selection.' });
+      return;
+    }
+    if (blood_group && !ALLOWED_BLOOD_GROUPS.has(String(blood_group))) {
+      res.status(400).json({ error: 'Invalid blood group selection.' });
+      return;
+    }
+    if (genotype && !ALLOWED_GENOTYPES.has(String(genotype))) {
+      res.status(400).json({ error: 'Invalid genotype selection.' });
       return;
     }
 
     const db = loadDb();
-    const normalizedEmail = String(email).trim().toLowerCase();
     if (db.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
       res.status(409).json({ error: 'An account with this email already exists.' });
       return;
@@ -196,11 +439,11 @@ async function startServer(): Promise<void> {
       email: normalizedEmail,
       phone: phone ? String(phone).trim() : null,
       gender: gender || null,
-      date_of_birth: date_of_birth || null,
+      date_of_birth: date_of_birth && isValidCalendarDate(String(date_of_birth)) ? String(date_of_birth) : null,
       address: address ? String(address).trim() : null,
       is_active: true,
       role: 'patient',
-      password_hash: hashPassword(String(password)),
+      password_hash: hashPassword(passStr),
       created_at: now,
       updated_at: now,
     };
@@ -249,16 +492,11 @@ async function startServer(): Promise<void> {
     saveDb(db);
 
     const token = signToken(newUser);
-    res.cookie('fudma_token', token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 1000 * 60 * 60 * 24 * 7,
-    });
+    setSessionCookie(res, token);
     res.status(201).json({ token, user: buildAuthUser(newUser) });
   });
 
-  app.post('/api/auth/login', (req: Request, res: Response) => {
+  app.post('/api/auth/login', loginIpLimiter, loginLimiter, (req: Request, res: Response) => {
     const { email, password } = req.body ?? {};
     if (!email || !password) {
       res.status(400).json({ error: 'Email and password are required.' });
@@ -274,64 +512,26 @@ async function startServer(): Promise<void> {
       res.status(403).json({ error: 'This account has been deactivated by an administrator.' });
       return;
     }
+    if (isDisallowedDemoUserInProd(user)) {
+      res.status(403).json({ error: 'Demonstration accounts are disabled in production.' });
+      return;
+    }
 
     const token = signToken(user);
-    res.cookie('fudma_token', token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 1000 * 60 * 60 * 24 * 7,
-    });
+    setSessionCookie(res, token);
     res.json({ token, user: buildAuthUser(user) });
   });
 
   app.post('/api/auth/logout', (_req: Request, res: Response) => {
-    res.clearCookie('fudma_token', { path: '/' });
+    clearSessionCookie(res);
     res.json({ ok: true });
   });
 
-  app.post('/api/auth/reset-password', (req: Request, res: Response) => {
-    const { email, new_password, hospital_or_staff_check } = req.body ?? {};
-    if (!email || !new_password) {
-      res.status(400).json({ error: 'Email and new password are required.' });
-      return;
-    }
-    if (String(new_password).length < 6) {
-      res.status(400).json({ error: 'New password must be at least 6 characters.' });
-      return;
-    }
-    const db = loadDb();
-    const user = db.users.find((u) => u.email.toLowerCase() === String(email).trim().toLowerCase());
-    if (!user) {
-      res.status(404).json({ error: 'No matching account found for that email address.' });
-      return;
-    }
-    // Verify phone or hospital/matric ID if provided for basic identity verification
-    if (hospital_or_staff_check) {
-      const checkVal = String(hospital_or_staff_check).trim().toLowerCase();
-      const pat = db.patients.find((p) => p.profile_id === user.id);
-      const matchesPhone = (user.phone || '').toLowerCase().includes(checkVal);
-      const matchesHosp = (pat?.hospital_number || '').toLowerCase() === checkVal;
-      const matchesMatric = (pat?.matric_or_staff_id || '').toLowerCase() === checkVal;
-      if (!matchesPhone && !matchesHosp && !matchesMatric && user.role === 'patient') {
-        res.status(400).json({ error: 'Verification detail did not match our records.' });
-        return;
-      }
-    }
-
-    user.password_hash = hashPassword(String(new_password));
-    user.updated_at = new Date().toISOString();
-    addActivityLog(db, {
-      actor_id: user.id,
-      actor_name: user.full_name,
-      actor_role: user.role,
-      action: 'PASSWORD_RESET',
-      entity_type: 'profile',
-      entity_id: user.email,
-      details: 'Account password updated via password reset.',
+  app.post('/api/auth/reset-password', resetLimiter, (_req: Request, res: Response) => {
+    res.status(403).json({
+      error:
+        'Unauthenticated password reset is disabled for security. Use Supabase Auth email recovery or contact the System Administrator.',
     });
-    saveDb(db);
-    res.json({ ok: true, message: 'Password updated successfully. You may now sign in.' });
   });
 
   app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res: Response) => {
@@ -361,7 +561,7 @@ async function startServer(): Promise<void> {
   // PATIENTS (PROFILE, SEARCH, WALK-IN REGISTRATION)
   // =========================================================================
 
-  app.get('/api/patients', requireAuth, (req: AuthedRequest, res: Response) => {
+  app.get('/api/patients', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     if (user.role === 'patient') {
@@ -463,6 +663,7 @@ async function startServer(): Promise<void> {
       return;
     }
 
+    const body = req.body ?? {};
     const {
       full_name,
       phone,
@@ -477,7 +678,47 @@ async function startServer(): Promise<void> {
       allergies,
       emergency_contact_name,
       emergency_contact_phone,
-    } = req.body ?? {};
+    } = body;
+
+    if (user.role === 'patient') {
+      const restrictedFields = [
+        'hospital_number',
+        'matric_or_staff_id',
+        'patient_category',
+        'faculty_or_unit',
+        'is_walk_in',
+        'profile_id',
+      ];
+      for (const field of restrictedFields) {
+        if (body[field] !== undefined) {
+          res.status(403).json({
+            error: `Patients cannot modify restricted institutional identity field (${field}).`,
+          });
+          return;
+        }
+      }
+    }
+
+    if (gender !== undefined && gender !== null && gender !== '' && !ALLOWED_GENDERS.has(String(gender))) {
+      res.status(400).json({ error: 'Invalid gender value.' });
+      return;
+    }
+    if (patient_category !== undefined && !ALLOWED_CATEGORIES.has(String(patient_category))) {
+      res.status(400).json({ error: 'Invalid patient category value.' });
+      return;
+    }
+    if (blood_group !== undefined && !ALLOWED_BLOOD_GROUPS.has(String(blood_group))) {
+      res.status(400).json({ error: 'Invalid blood group value.' });
+      return;
+    }
+    if (genotype !== undefined && !ALLOWED_GENOTYPES.has(String(genotype))) {
+      res.status(400).json({ error: 'Invalid genotype value.' });
+      return;
+    }
+    if (date_of_birth !== undefined && date_of_birth !== null && date_of_birth !== '' && !isValidCalendarDate(String(date_of_birth))) {
+      res.status(400).json({ error: 'Invalid date of birth format (YYYY-MM-DD).' });
+      return;
+    }
 
     const now = new Date().toISOString();
     if (full_name) pat.full_name = String(full_name).trim();
@@ -485,14 +726,16 @@ async function startServer(): Promise<void> {
     if (gender !== undefined) pat.gender = gender || null;
     if (date_of_birth !== undefined) pat.date_of_birth = date_of_birth || null;
     if (address !== undefined) pat.address = address ? String(address).trim() : null;
-    if (matric_or_staff_id !== undefined) pat.matric_or_staff_id = matric_or_staff_id || null;
-    if (patient_category) pat.patient_category = patient_category;
-    if (faculty_or_unit !== undefined) pat.faculty_or_unit = faculty_or_unit || null;
+    if (user.role !== 'patient') {
+      if (matric_or_staff_id !== undefined) pat.matric_or_staff_id = matric_or_staff_id ? String(matric_or_staff_id).trim() : null;
+      if (patient_category) pat.patient_category = patient_category;
+      if (faculty_or_unit !== undefined) pat.faculty_or_unit = faculty_or_unit ? String(faculty_or_unit).trim() : null;
+    }
     if (blood_group) pat.blood_group = blood_group;
     if (genotype) pat.genotype = genotype;
-    if (allergies !== undefined) pat.allergies = allergies || null;
-    if (emergency_contact_name !== undefined) pat.emergency_contact_name = emergency_contact_name || null;
-    if (emergency_contact_phone !== undefined) pat.emergency_contact_phone = emergency_contact_phone || null;
+    if (allergies !== undefined) pat.allergies = allergies ? String(allergies).trim() : null;
+    if (emergency_contact_name !== undefined) pat.emergency_contact_name = emergency_contact_name ? String(emergency_contact_name).trim() : null;
+    if (emergency_contact_phone !== undefined) pat.emergency_contact_phone = emergency_contact_phone ? String(emergency_contact_phone).trim() : null;
     pat.updated_at = now;
 
     if (pat.profile_id) {
@@ -524,7 +767,7 @@ async function startServer(): Promise<void> {
   // APPOINTMENTS & NURSING CHECK-IN / QUEUE ALLOCATION
   // =========================================================================
 
-  app.get('/api/appointments', requireAuth, (req: AuthedRequest, res: Response) => {
+  app.get('/api/appointments', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     let list = db.appointments;
@@ -534,7 +777,11 @@ async function startServer(): Promise<void> {
       list = pat ? list.filter((a) => a.patient_id === pat.id) : [];
     } else if (user.role === 'doctor') {
       const doc = db.doctors.find((d) => d.profile_id === user.id);
-      list = doc ? list.filter((a) => a.doctor_id === doc.id || a.status === 'Waiting' || a.status === 'Checked In') : list;
+      list = doc
+        ? list.filter(
+            (a) => a.doctor_id === doc.id || (!a.doctor_id && (a.status === 'Waiting' || a.status === 'Checked In'))
+          )
+        : [];
     }
 
     const enriched = list
@@ -578,6 +825,10 @@ async function startServer(): Promise<void> {
         res.status(404).json({ error: 'Patient profile not found.' });
         return;
       }
+      if (patient_id && patient_id !== ownPat.id) {
+        res.status(403).json({ error: 'Patients can only book appointments for their own file.' });
+        return;
+      }
       targetPatientId = ownPat.id;
     }
 
@@ -591,8 +842,41 @@ async function startServer(): Promise<void> {
       return;
     }
 
+    const dept = db.departments.find((d) => d.id === department_id);
+    if (!dept || !dept.is_active) {
+      res.status(400).json({ error: 'Selected clinical department is invalid or inactive.' });
+      return;
+    }
+    if (doctor_id) {
+      const doc = db.doctors.find((d) => d.id === doctor_id);
+      if (!doc || !doc.is_available) {
+        res.status(400).json({ error: 'Selected doctor is invalid or unavailable.' });
+        return;
+      }
+    }
+
+    const dateStr = String(appointment_date).trim();
+    const timeStr = String(appointment_time).trim();
+    if (!isValidCalendarDate(dateStr)) {
+      res.status(400).json({ error: 'Invalid appointment date format (YYYY-MM-DD).' });
+      return;
+    }
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (dateStr < todayStr) {
+      res.status(400).json({ error: 'Appointment date cannot be in the past.' });
+      return;
+    }
+    if (!VALID_TIME_REGEX.test(timeStr)) {
+      res.status(400).json({ error: 'Invalid appointment time format (HH:MM).' });
+      return;
+    }
+    if (user.role === 'patient' && !CLINIC_TIME_SLOTS.has(timeStr)) {
+      res.status(400).json({ error: 'Please select a valid clinic consultation time slot (08:00 - 17:30).' });
+      return;
+    }
+
     const sameDayCount = db.appointments.filter(
-      (a) => a.appointment_date === appointment_date && a.status !== 'Cancelled'
+      (a) => a.appointment_date === dateStr && a.status !== 'Cancelled'
     ).length;
     if (sameDayCount >= db.system_settings.max_daily_appointments) {
       res.status(409).json({ error: 'Selected date has reached maximum daily clinic capacity.' });
@@ -602,8 +886,8 @@ async function startServer(): Promise<void> {
     const conflict = db.appointments.find(
       (a) =>
         a.patient_id === pat.id &&
-        a.appointment_date === appointment_date &&
-        a.appointment_time === appointment_time &&
+        a.appointment_date === dateStr &&
+        a.appointment_time === timeStr &&
         a.status !== 'Cancelled'
     );
     if (conflict) {
@@ -615,18 +899,18 @@ async function startServer(): Promise<void> {
     const code = nextCode('APT', db.appointments.map((a) => a.appointment_code));
     const isWalkInCheckIn = Boolean(auto_check_in && (user.role === 'nurse' || user.role === 'admin'));
     const dayQueueMax = db.appointments
-      .filter((a) => a.appointment_date === appointment_date && a.queue_number)
+      .filter((a) => a.appointment_date === dateStr && a.queue_number)
       .reduce((acc, item) => Math.max(acc, item.queue_number || 0), 0);
 
     const appt = {
       id: crypto.randomUUID(),
       appointment_code: code,
       patient_id: pat.id,
-      department_id,
+      department_id: dept.id,
       doctor_id: doctor_id || null,
       consultation_category: String(consultation_category).trim(),
-      appointment_date: String(appointment_date),
-      appointment_time: String(appointment_time),
+      appointment_date: dateStr,
+      appointment_time: timeStr,
       reason: String(reason).trim(),
       status: isWalkInCheckIn ? ('Checked In' as const) : ('Booked' as const),
       queue_number: isWalkInCheckIn ? dayQueueMax + 1 : null,
@@ -685,6 +969,10 @@ async function startServer(): Promise<void> {
         res.status(403).json({ error: 'Access denied.' });
         return;
       }
+      if (doctor_id !== undefined || appointment_date !== undefined || appointment_time !== undefined || notes !== undefined) {
+        res.status(403).json({ error: 'Patients may not modify scheduling slots, doctor allocation, or clinical notes.' });
+        return;
+      }
       if (status !== 'Cancelled') {
         res.status(403).json({ error: 'Patients may only cancel eligible appointments.' });
         return;
@@ -702,13 +990,62 @@ async function startServer(): Promise<void> {
       return;
     }
 
+    if (status !== undefined) {
+      const nextStatus = String(status) as AppointmentStatus;
+      if (!(nextStatus in ALLOWED_APPOINTMENT_TRANSITIONS)) {
+        res.status(400).json({ error: 'Invalid appointment status value.' });
+        return;
+      }
+      if (nextStatus !== appt.status && !ALLOWED_APPOINTMENT_TRANSITIONS[appt.status].includes(nextStatus)) {
+        res.status(400).json({
+          error: `Invalid appointment status transition from ${appt.status} to ${nextStatus}.`,
+        });
+        return;
+      }
+      if (user.role === 'doctor') {
+        const doc = db.doctors.find((d) => d.profile_id === user.id);
+        if (!doc || (appt.doctor_id && appt.doctor_id !== doc.id)) {
+          res.status(403).json({ error: 'Doctors can only update appointments assigned to them.' });
+          return;
+        }
+      }
+    }
+
+    if (doctor_id !== undefined && doctor_id !== null && doctor_id !== '') {
+      if (!['nurse', 'admin'].includes(user.role)) {
+        res.status(403).json({ error: 'Only nursing staff or administrators can assign consultant doctors.' });
+        return;
+      }
+      const doc = db.doctors.find((d) => d.id === doctor_id);
+      if (!doc) {
+        res.status(404).json({ error: 'Assigned consultant doctor not found.' });
+        return;
+      }
+    }
+
+    if (appointment_date !== undefined) {
+      const dateStr = String(appointment_date).trim();
+      if (!isValidCalendarDate(dateStr)) {
+        res.status(400).json({ error: 'Invalid appointment date format (YYYY-MM-DD).' });
+        return;
+      }
+      if (dateStr < new Date().toISOString().slice(0, 10)) {
+        res.status(400).json({ error: 'Rescheduled appointment date cannot be in the past.' });
+        return;
+      }
+    }
+    if (appointment_time !== undefined && !VALID_TIME_REGEX.test(String(appointment_time).trim())) {
+      res.status(400).json({ error: 'Invalid appointment time format (HH:MM).' });
+      return;
+    }
+
     const now = new Date().toISOString();
     const prevStatus = appt.status;
     if (status) appt.status = status;
     if (doctor_id !== undefined) appt.doctor_id = doctor_id || null;
-    if (appointment_date) appt.appointment_date = appointment_date;
-    if (appointment_time) appt.appointment_time = appointment_time;
-    if (notes !== undefined) appt.notes = notes;
+    if (appointment_date) appt.appointment_date = String(appointment_date).trim();
+    if (appointment_time) appt.appointment_time = String(appointment_time).trim();
+    if (notes !== undefined) appt.notes = notes ? String(notes).trim() : null;
 
     if ((status === 'Checked In' || status === 'Waiting') && !appt.queue_number) {
       const dayMax = db.appointments
@@ -769,7 +1106,7 @@ async function startServer(): Promise<void> {
   // PATIENT VITALS (NURSING & DOCTOR)
   // =========================================================================
 
-  app.get('/api/vitals', requireAuth, (req: AuthedRequest, res: Response) => {
+  app.get('/api/vitals', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     let list = db.vitals;
@@ -814,6 +1151,46 @@ async function startServer(): Promise<void> {
       res.status(404).json({ error: 'Appointment not found.' });
       return;
     }
+    if (appt.status === 'Cancelled' || appt.status === 'Completed') {
+      res.status(400).json({ error: `Cannot record triage vitals for a ${appt.status} appointment.` });
+      return;
+    }
+    if (priority && !ALLOWED_PRIORITIES.has(String(priority))) {
+      res.status(400).json({ error: 'Invalid triage priority level.' });
+      return;
+    }
+    if (doctor_id) {
+      const doc = db.doctors.find((d) => d.id === doctor_id);
+      if (!doc) {
+        res.status(404).json({ error: 'Allocated consultant doctor not found.' });
+        return;
+      }
+    }
+
+    const parseOptNum = (val: unknown, min: number, max: number, label: string): number | null | 'INVALID' => {
+      if (val === undefined || val === null || val === '') return null;
+      const n = Number(val);
+      if (!Number.isFinite(n) || n < min || n > max) return 'INVALID';
+      return n;
+    };
+
+    const tempVal = parseOptNum(temperature_c, 30, 45, 'Temperature');
+    const pulseVal = parseOptNum(pulse_bpm, 20, 250, 'Pulse');
+    const respVal = parseOptNum(respiratory_rate, 5, 80, 'Respiratory rate');
+    const spo2Val = parseOptNum(spo2_percent, 40, 100, 'SpO2');
+    const weightVal = parseOptNum(weight_kg, 1, 350, 'Weight');
+    const heightVal = parseOptNum(height_cm, 30, 250, 'Height');
+    if (
+      tempVal === 'INVALID' ||
+      pulseVal === 'INVALID' ||
+      respVal === 'INVALID' ||
+      spo2Val === 'INVALID' ||
+      weightVal === 'INVALID' ||
+      heightVal === 'INVALID'
+    ) {
+      res.status(400).json({ error: 'One or more vital sign measurements are outside valid clinical ranges.' });
+      return;
+    }
 
     const now = new Date().toISOString();
     const vital = {
@@ -821,13 +1198,13 @@ async function startServer(): Promise<void> {
       appointment_id: appt.id,
       patient_id: appt.patient_id,
       recorded_by: user.id,
-      temperature_c: temperature_c !== undefined && temperature_c !== '' ? Number(temperature_c) : null,
+      temperature_c: tempVal,
       blood_pressure: blood_pressure ? String(blood_pressure).trim() : null,
-      pulse_bpm: pulse_bpm !== undefined && pulse_bpm !== '' ? Number(pulse_bpm) : null,
-      respiratory_rate: respiratory_rate !== undefined && respiratory_rate !== '' ? Number(respiratory_rate) : null,
-      spo2_percent: spo2_percent !== undefined && spo2_percent !== '' ? Number(spo2_percent) : null,
-      weight_kg: weight_kg !== undefined && weight_kg !== '' ? Number(weight_kg) : null,
-      height_cm: height_cm !== undefined && height_cm !== '' ? Number(height_cm) : null,
+      pulse_bpm: pulseVal,
+      respiratory_rate: respVal,
+      spo2_percent: spo2Val,
+      weight_kg: weightVal,
+      height_cm: heightVal,
       triage_notes: triage_notes ? String(triage_notes).trim() : null,
       priority: (priority || 'Normal') as 'Normal' | 'Urgent' | 'Emergency',
       created_at: now,
@@ -932,20 +1309,44 @@ async function startServer(): Promise<void> {
       res.status(404).json({ error: 'Appointment not found.' });
       return;
     }
+    if (!['Checked In', 'Waiting', 'In Consultation', 'Completed'].includes(appt.status)) {
+      res.status(400).json({ error: `Cannot consult on an appointment in "${appt.status}" status.` });
+      return;
+    }
     if (!chief_complaint || !clinical_observations || !diagnosis) {
       res.status(400).json({ error: 'Chief complaint, clinical observations, and diagnosis are required.' });
       return;
     }
+    if (status && !['In Progress', 'Awaiting Lab', 'Completed'].includes(String(status))) {
+      res.status(400).json({ error: 'Invalid consultation status.' });
+      return;
+    }
+    if (follow_up_date && !isValidCalendarDate(String(follow_up_date))) {
+      res.status(400).json({ error: 'Invalid follow-up date format (YYYY-MM-DD).' });
+      return;
+    }
 
-    const docRecord = db.doctors.find((d) => d.profile_id === user.id) || db.doctors.find((d) => d.id === appt.doctor_id);
+    const docRecord =
+      user.role === 'doctor'
+        ? db.doctors.find((d) => d.profile_id === user.id)
+        : db.doctors.find((d) => d.id === appt.doctor_id) || db.doctors.find((d) => d.profile_id === user.id);
+
     if (!docRecord) {
-      res.status(400).json({ error: 'Consultant doctor profile is not linked.' });
+      res.status(403).json({ error: 'Consultant doctor profile is not linked.' });
+      return;
+    }
+    if (user.role === 'doctor' && appt.doctor_id && appt.doctor_id !== docRecord.id) {
+      res.status(403).json({ error: 'This appointment is assigned to another consultant doctor.' });
       return;
     }
 
     const now = new Date().toISOString();
     let consultation = db.consultations.find((c) => c.appointment_id === appt.id);
     if (consultation) {
+      if (user.role === 'doctor' && consultation.doctor_id !== docRecord.id) {
+        res.status(403).json({ error: 'Only the attending consultant doctor may update this consultation.' });
+        return;
+      }
       consultation.chief_complaint = String(chief_complaint).trim();
       consultation.clinical_observations = String(clinical_observations).trim();
       consultation.diagnosis = String(diagnosis).trim();
@@ -1046,8 +1447,19 @@ async function startServer(): Promise<void> {
       res.status(404).json({ error: 'Consultation record not found.' });
       return;
     }
+    if (user.role === 'doctor') {
+      const docRecord = db.doctors.find((d) => d.profile_id === user.id);
+      if (!docRecord || con.doctor_id !== docRecord.id) {
+        res.status(403).json({ error: 'Only the attending consultant doctor may order labs for this consultation.' });
+        return;
+      }
+    }
     if (!test_name || !test_category) {
       res.status(400).json({ error: 'Test name and category are required.' });
+      return;
+    }
+    if (urgency && !ALLOWED_URGENCIES.has(String(urgency))) {
+      res.status(400).json({ error: 'Invalid urgency level.' });
       return;
     }
 
@@ -1108,12 +1520,56 @@ async function startServer(): Promise<void> {
     const pat = db.patients.find((p) => p.id === labReq.patient_id);
     const doc = db.doctors.find((d) => d.id === labReq.doctor_id);
 
-    if (user.role === 'lab' || user.role === 'admin') {
+    if (status !== undefined) {
+      const nextStatus = String(status) as LabStatus;
+      if (!(nextStatus in ALLOWED_LAB_TRANSITIONS)) {
+        res.status(400).json({ error: 'Invalid laboratory request status.' });
+        return;
+      }
+      if (nextStatus !== labReq.status && !ALLOWED_LAB_TRANSITIONS[labReq.status].includes(nextStatus)) {
+        res.status(400).json({
+          error: `Invalid laboratory status transition from ${labReq.status} to ${nextStatus}.`,
+        });
+        return;
+      }
+    }
+
+    if (interpretation && !ALLOWED_INTERPRETATIONS.has(String(interpretation))) {
+      res.status(400).json({ error: 'Invalid laboratory result interpretation.' });
+      return;
+    }
+
+    if (user.role === 'doctor') {
+      const docRecord = db.doctors.find((d) => d.profile_id === user.id);
+      if (!docRecord || labReq.doctor_id !== docRecord.id) {
+        res.status(403).json({ error: 'Only the ordering consultant doctor may review this lab result.' });
+        return;
+      }
+      if (status !== 'Reviewed' || findings !== undefined) {
+        res.status(403).json({ error: 'Doctors may only mark completed lab results as Reviewed.' });
+        return;
+      }
+    }
+
+    if (user.role === 'lab' && status === 'Reviewed') {
+      res.status(403).json({ error: 'Only a consultant doctor or administrator may mark lab results as Reviewed.' });
+      return;
+    }
+
+    if ((user.role === 'lab' || user.role === 'admin') && status !== 'Reviewed') {
+      if (labReq.status === 'Reviewed') {
+        res.status(400).json({ error: 'Reviewed laboratory reports are locked and cannot be modified.' });
+        return;
+      }
+      if (status === 'Completed' && (!findings || !String(findings).trim())) {
+        res.status(400).json({ error: 'Diagnostic findings are required to complete a laboratory request.' });
+        return;
+      }
       if (status) {
         labReq.status = status;
         labReq.assigned_lab_staff = user.id;
       }
-      if (findings) {
+      if (findings && String(findings).trim()) {
         let result = db.laboratory_results.find((r) => r.lab_request_id === labReq.id);
         if (result) {
           result.findings = String(findings).trim();
@@ -1140,6 +1596,7 @@ async function startServer(): Promise<void> {
           db.laboratory_results.unshift(result);
         }
         labReq.status = 'Completed';
+        labReq.assigned_lab_staff = user.id;
 
         if (doc) {
           addNotification(db, {
@@ -1163,13 +1620,15 @@ async function startServer(): Promise<void> {
     }
 
     if ((user.role === 'doctor' || user.role === 'admin') && status === 'Reviewed') {
-      labReq.status = 'Reviewed';
       const result = db.laboratory_results.find((r) => r.lab_request_id === labReq.id);
-      if (result) {
-        result.reviewed_by_doctor = true;
-        result.reviewed_at = now;
-        result.updated_at = now;
+      if (!result || labReq.status !== 'Completed') {
+        res.status(400).json({ error: 'Only completed laboratory reports with recorded findings can be reviewed.' });
+        return;
       }
+      labReq.status = 'Reviewed';
+      result.reviewed_by_doctor = true;
+      result.reviewed_at = now;
+      result.updated_at = now;
       if (pat?.profile_id) {
         addNotification(db, {
           recipient_user_id: pat.profile_id,
@@ -1310,9 +1769,51 @@ async function startServer(): Promise<void> {
       res.status(404).json({ error: 'Consultation not found.' });
       return;
     }
+    if (user.role === 'doctor') {
+      const docRecord = db.doctors.find((d) => d.profile_id === user.id);
+      if (!docRecord || con.doctor_id !== docRecord.id) {
+        res.status(403).json({ error: 'Only the attending consultant doctor may issue prescriptions for this consultation.' });
+        return;
+      }
+    }
     if (!Array.isArray(items) || items.length === 0) {
       res.status(400).json({ error: 'At least one prescribed medication item is required.' });
       return;
+    }
+
+    const validatedItems: Array<{
+      medication_id: string | null;
+      medication_name: string;
+      dosage: string;
+      frequency: string;
+      duration: string;
+      quantity_prescribed: number;
+      instructions: string | null;
+    }> = [];
+
+    for (const item of items) {
+      const qty = Number(item.quantity_prescribed);
+      if (!Number.isInteger(qty) || qty < 1 || qty > 1000) {
+        res.status(400).json({ error: 'Prescribed quantity must be a whole number between 1 and 1000.' });
+        return;
+      }
+      let med = null;
+      if (item.medication_id) {
+        med = db.medications.find((m) => m.id === item.medication_id) || null;
+        if (!med) {
+          res.status(400).json({ error: 'Referenced formulary medication does not exist.' });
+          return;
+        }
+      }
+      validatedItems.push({
+        medication_id: med ? med.id : null,
+        medication_name: med ? med.name : String(item.medication_name || 'Prescribed Drug').trim(),
+        dosage: String(item.dosage || 'As directed').trim(),
+        frequency: String(item.frequency || 'Twice daily').trim(),
+        duration: String(item.duration || '5 days').trim(),
+        quantity_prescribed: qty,
+        instructions: item.instructions ? String(item.instructions).trim() : null,
+      });
     }
 
     const now = new Date().toISOString();
@@ -1330,20 +1831,19 @@ async function startServer(): Promise<void> {
     };
     db.prescriptions.unshift(rx);
 
-    for (const item of items) {
-      const med = item.medication_id ? db.medications.find((m) => m.id === item.medication_id) : null;
+    for (const vItem of validatedItems) {
       db.prescription_items.push({
         id: crypto.randomUUID(),
         prescription_id: rx.id,
-        medication_id: med ? med.id : null,
-        medication_name: med ? med.name : String(item.medication_name || 'Prescribed Drug').trim(),
-        dosage: String(item.dosage || 'As directed').trim(),
-        frequency: String(item.frequency || 'Twice daily').trim(),
-        duration: String(item.duration || '5 days').trim(),
-        quantity_prescribed: Math.max(1, Number(item.quantity_prescribed || 1)),
+        medication_id: vItem.medication_id,
+        medication_name: vItem.medication_name,
+        dosage: vItem.dosage,
+        frequency: vItem.frequency,
+        duration: vItem.duration,
+        quantity_prescribed: vItem.quantity_prescribed,
         quantity_dispensed: 0,
         availability_status: 'Pending',
-        instructions: item.instructions ? String(item.instructions).trim() : null,
+        instructions: vItem.instructions,
         created_at: now,
         updated_at: now,
       });
@@ -1353,7 +1853,7 @@ async function startServer(): Promise<void> {
     addNotification(db, {
       recipient_role: 'pharmacy',
       title: 'New Prescription Issued',
-      message: `Prescription ${code} issued for ${pat?.full_name || 'Patient'} (${items.length} medication item(s)).`,
+      message: `Prescription ${code} issued for ${pat?.full_name || 'Patient'} (${validatedItems.length} medication item(s)).`,
       category: 'pharmacy',
       reference_id: rx.id,
     });
@@ -1373,7 +1873,7 @@ async function startServer(): Promise<void> {
       action: 'PRESCRIPTION_ISSUED',
       entity_type: 'prescription',
       entity_id: code,
-      details: `Issued ${items.length} item(s) for ${pat?.full_name || 'Patient'}.`,
+      details: `Issued ${validatedItems.length} item(s) for ${pat?.full_name || 'Patient'}.`,
     });
     saveDb(db);
     res.status(201).json({ prescription: rx });
@@ -1387,70 +1887,185 @@ async function startServer(): Promise<void> {
       res.status(404).json({ error: 'Prescription not found.' });
       return;
     }
+    if (rx.status === 'Dispensed') {
+      res.status(400).json({ error: 'Prescription has already been fully dispensed and cannot be altered.' });
+      return;
+    }
 
     const { status, pharmacist_notes, item_updates } = req.body ?? {};
-    const now = new Date().toISOString();
-
-    if (Array.isArray(item_updates)) {
-      for (const upd of item_updates) {
-        const item = db.prescription_items.find((it) => it.id === upd.id && it.prescription_id === rx.id);
-        if (!item) continue;
-        const prevDispensed = item.quantity_dispensed;
-        const newDispensed = upd.quantity_dispensed !== undefined ? Math.max(0, Number(upd.quantity_dispensed)) : item.quantity_dispensed;
-        const delta = newDispensed - prevDispensed;
-
-        if (delta > 0 && item.medication_id) {
-          const med = db.medications.find((m) => m.id === item.medication_id);
-          if (med) {
-            if (med.stock_quantity < delta) {
-              res.status(400).json({ error: `Insufficient stock for ${med.name} (${med.stock_quantity} available).` });
-              return;
-            }
-            med.stock_quantity -= delta;
-            med.updated_at = now;
-          }
-        }
-        item.quantity_dispensed = newDispensed;
-        if (upd.availability_status) {
-          item.availability_status = upd.availability_status;
-        } else if (newDispensed >= item.quantity_prescribed) {
-          item.availability_status = 'Dispensed';
-        }
-        item.updated_at = now;
+    if (status !== undefined) {
+      const nextStatus = String(status) as PrescriptionStatus;
+      if (!(nextStatus in ALLOWED_PRESCRIPTION_TRANSITIONS)) {
+        res.status(400).json({ error: 'Invalid prescription status.' });
+        return;
       }
-    } else if (status === 'Dispensed') {
-      // Dispense all items in full when quick-dispensing
-      const items = db.prescription_items.filter((it) => it.prescription_id === rx.id);
-      for (const item of items) {
-        const remaining = Math.max(0, item.quantity_prescribed - item.quantity_dispensed);
-        if (remaining > 0 && item.medication_id) {
-          const med = db.medications.find((m) => m.id === item.medication_id);
-          if (med) {
-            if (med.stock_quantity < remaining) {
-              res.status(400).json({ error: `Insufficient stock for ${med.name} (${med.stock_quantity} available).` });
-              return;
-            }
-            med.stock_quantity -= remaining;
-            med.updated_at = now;
-          }
-        }
-        item.quantity_dispensed = item.quantity_prescribed;
-        item.availability_status = 'Dispensed';
-        item.updated_at = now;
+      if (nextStatus !== rx.status && !ALLOWED_PRESCRIPTION_TRANSITIONS[rx.status].includes(nextStatus)) {
+        res.status(400).json({
+          error: `Invalid prescription status transition from ${rx.status} to ${nextStatus}.`,
+        });
+        return;
       }
     }
 
-    if (status) rx.status = status;
-    if (pharmacist_notes !== undefined) rx.pharmacist_notes = pharmacist_notes || null;
+    const now = new Date().toISOString();
+    const rxItems = db.prescription_items.filter((it) => it.prescription_id === rx.id);
+    const plannedUpdates: Array<{
+      item: (typeof rxItems)[number];
+      newDispensed: number;
+      delta: number;
+      availability_status: (typeof rxItems)[number]['availability_status'];
+    }> = [];
+
+    if (Array.isArray(item_updates)) {
+      for (const upd of item_updates) {
+        const item = rxItems.find((it) => it.id === upd.id);
+        if (!item) {
+          res.status(404).json({ error: 'Prescription item not found on this prescription.' });
+          return;
+        }
+        const prevDispensed = item.quantity_dispensed;
+        let newDispensed = prevDispensed;
+        if (upd.quantity_dispensed !== undefined) {
+          const parsed = Number(upd.quantity_dispensed);
+          if (!Number.isInteger(parsed) || parsed < 0) {
+            res.status(400).json({ error: 'Dispensed quantity must be a non-negative whole number.' });
+            return;
+          }
+          if (parsed > item.quantity_prescribed) {
+            res.status(400).json({
+              error: `Cannot dispense ${parsed} units of ${item.medication_name}; only ${item.quantity_prescribed} prescribed.`,
+            });
+            return;
+          }
+          if (parsed < prevDispensed) {
+            res.status(400).json({
+              error: `Dispensed quantity for ${item.medication_name} cannot be reduced below already-dispensed amount (${prevDispensed}).`,
+            });
+            return;
+          }
+          newDispensed = parsed;
+        }
+        const nextAvail =
+          upd.availability_status ||
+          (newDispensed >= item.quantity_prescribed ? 'Dispensed' : item.availability_status);
+        plannedUpdates.push({
+          item,
+          newDispensed,
+          delta: newDispensed - prevDispensed,
+          availability_status: nextAvail,
+        });
+      }
+    } else if (status === 'Dispensed') {
+      for (const item of rxItems) {
+        const remaining = Math.max(0, item.quantity_prescribed - item.quantity_dispensed);
+        plannedUpdates.push({
+          item,
+          newDispensed: item.quantity_prescribed,
+          delta: remaining,
+          availability_status: 'Dispensed',
+        });
+      }
+    } else if (status === 'Partially Dispensed') {
+      for (const item of rxItems) {
+        const remaining = Math.max(0, item.quantity_prescribed - item.quantity_dispensed);
+        let delta = 0;
+        if (remaining > 0) {
+          if (item.medication_id) {
+            const med = db.medications.find((m) => m.id === item.medication_id);
+            delta = med ? Math.min(remaining, med.stock_quantity) : remaining;
+          } else {
+            delta = remaining;
+          }
+        }
+        const newDispensed = item.quantity_dispensed + delta;
+        plannedUpdates.push({
+          item,
+          newDispensed,
+          delta,
+          availability_status:
+            newDispensed >= item.quantity_prescribed
+              ? 'Dispensed'
+              : newDispensed > 0
+                ? 'Available'
+                : 'Unavailable',
+        });
+      }
+    }
+
+    // Phase 1: Validate aggregate medication stock across ALL planned updates before mutating anything
+    const stockNeededByMed = new Map<string, number>();
+    for (const plan of plannedUpdates) {
+      if (plan.delta > 0 && plan.item.medication_id) {
+        stockNeededByMed.set(
+          plan.item.medication_id,
+          (stockNeededByMed.get(plan.item.medication_id) || 0) + plan.delta
+        );
+      }
+    }
+    for (const [medId, totalNeeded] of stockNeededByMed.entries()) {
+      const med = db.medications.find((m) => m.id === medId);
+      if (med && med.stock_quantity < totalNeeded) {
+        res.status(400).json({ error: `Insufficient stock for ${med.name} (${med.stock_quantity} available, ${totalNeeded} required).` });
+        return;
+      }
+    }
+
+    // Check consistency for Partially Dispensed
+    if (status === 'Partially Dispensed') {
+      const projectedTotalDispensed = rxItems.reduce((sum, it) => {
+        const p = plannedUpdates.find((u) => u.item.id === it.id);
+        return sum + (p ? p.newDispensed : it.quantity_dispensed);
+      }, 0);
+      if (projectedTotalDispensed <= 0) {
+        res.status(400).json({
+          error: 'No medication stock is available to partially dispense. Mark as Unavailable instead.',
+        });
+        return;
+      }
+    }
+
+    // Phase 2: Commit stock deductions and item updates atomically
+    let totalNewlyDispensed = 0;
+    for (const plan of plannedUpdates) {
+      if (plan.delta > 0 && plan.item.medication_id) {
+        const med = db.medications.find((m) => m.id === plan.item.medication_id);
+        if (med) {
+          med.stock_quantity -= plan.delta;
+          med.updated_at = now;
+        }
+      }
+      totalNewlyDispensed += plan.delta;
+      plan.item.quantity_dispensed = plan.newDispensed;
+      plan.item.availability_status = plan.availability_status;
+      plan.item.updated_at = now;
+    }
+
+    // Determine final status consistently with dispensed quantities
+    const allItemsFull = rxItems.length > 0 && rxItems.every((it) => it.quantity_dispensed >= it.quantity_prescribed);
+    const anyItemDispensed = rxItems.some((it) => it.quantity_dispensed > 0);
+    if (status) {
+      if (Array.isArray(item_updates) && status === 'Partially Dispensed' && allItemsFull) {
+        rx.status = 'Dispensed';
+      } else if (status === 'Partially Dispensed' && allItemsFull && !anyItemDispensed) {
+        rx.status = 'Pending';
+      } else {
+        rx.status = status;
+      }
+    } else if (Array.isArray(item_updates)) {
+      if (allItemsFull) rx.status = 'Dispensed';
+      else if (anyItemDispensed) rx.status = 'Partially Dispensed';
+    }
+
+    if (pharmacist_notes !== undefined) rx.pharmacist_notes = pharmacist_notes ? String(pharmacist_notes).trim() : null;
     rx.updated_at = now;
 
-    if (rx.status === 'Dispensed' || rx.status === 'Partially Dispensed') {
+    if (totalNewlyDispensed > 0 && (rx.status === 'Dispensed' || rx.status === 'Partially Dispensed')) {
       db.pharmacy_dispensing.unshift({
         id: crypto.randomUUID(),
         prescription_id: rx.id,
         dispensed_by: user.id,
         dispensed_by_name: user.full_name,
-        dispensed_notes: rx.pharmacist_notes || `Marked as ${rx.status}`,
+        dispensed_notes: rx.pharmacist_notes || `Dispensed ${totalNewlyDispensed} unit(s) (${rx.status})`,
         dispensed_at: now,
         created_at: now,
       });
@@ -1460,8 +2075,8 @@ async function startServer(): Promise<void> {
     if (pat?.profile_id && status) {
       addNotification(db, {
         recipient_user_id: pat.profile_id,
-        title: `Prescription ${status}`,
-        message: `Your prescription ${rx.prescription_code} is now marked "${status}" at the FUDMA Pharmacy.`,
+        title: `Prescription ${rx.status}`,
+        message: `Your prescription ${rx.prescription_code} is now marked "${rx.status}" at the FUDMA Pharmacy.`,
         category: 'pharmacy',
         reference_id: rx.id,
       });
@@ -1495,11 +2110,20 @@ async function startServer(): Promise<void> {
 
   app.patch('/api/notifications/:id/read', requireAuth, (req: AuthedRequest, res: Response) => {
     const db = loadDb();
+    const user = req.currentUser!;
     const notif = db.notifications.find((n) => n.id === req.params.id);
-    if (notif) {
-      notif.is_read = true;
-      saveDb(db);
+    if (!notif) {
+      res.status(404).json({ error: 'Notification not found.' });
+      return;
     }
+    const isOwner = notif.recipient_user_id === user.id;
+    const isAuthorizedRole = notif.recipient_role !== null && notif.recipient_role === user.role;
+    if (!isOwner && !isAuthorizedRole) {
+      res.status(403).json({ error: 'You do not have permission to update this notification.' });
+      return;
+    }
+    notif.is_read = true;
+    saveDb(db);
     res.json({ ok: true });
   });
 
@@ -1646,8 +2270,32 @@ async function startServer(): Promise<void> {
       return;
     }
     const { role, is_active } = req.body ?? {};
-    if (role && ['patient', 'nurse', 'lab', 'pharmacy', 'doctor', 'admin'].includes(role)) {
+    if (target.id === admin.id && (is_active === false || (role && role !== 'admin'))) {
+      res.status(400).json({ error: 'Administrators cannot deactivate or demote their own active account.' });
+      return;
+    }
+    if (role !== undefined) {
+      const validStaffRoles: UserRole[] = ['nurse', 'lab', 'pharmacy', 'doctor', 'admin'];
+      if (!validStaffRoles.includes(role)) {
+        res.status(400).json({ error: 'Invalid staff role selected.' });
+        return;
+      }
       target.role = role;
+      if (role === 'doctor' && !db.doctors.some((d) => d.profile_id === target.id)) {
+        const now = new Date().toISOString();
+        db.doctors.push({
+          id: crypto.randomUUID(),
+          profile_id: target.id,
+          department_id: db.departments[0]?.id || 'd1000000-0000-4000-8000-000000000001',
+          staff_code: `FUDMA-MD-${String(db.doctors.length + 1).padStart(3, '0')}`,
+          specialization: 'General Medical Officer',
+          license_number: null,
+          consultation_room: `Consult Room ${db.doctors.length + 1}`,
+          is_available: true,
+          created_at: now,
+          updated_at: now,
+        });
+      }
     }
     if (typeof is_active === 'boolean') {
       target.is_active = is_active;
@@ -1749,6 +2397,23 @@ async function startServer(): Promise<void> {
     });
     saveDb(db);
     res.json({ settings: db.system_settings });
+  });
+
+  // =========================================================================
+  // GLOBAL API ERROR HANDLER (SANITIZED)
+  // =========================================================================
+
+  app.use('/api', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+      res.status(400).json({ error: 'Malformed JSON request payload.' });
+      return;
+    }
+    console.error('[SERVER ERROR]', err instanceof Error ? err.message : 'Unknown error');
+    res.status(500).json({ error: 'An internal server error occurred.' });
   });
 
   // =========================================================================

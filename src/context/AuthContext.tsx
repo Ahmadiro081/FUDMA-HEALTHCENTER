@@ -12,11 +12,7 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<AuthUser>;
   register: (payload: Record<string, unknown>) => Promise<AuthUser>;
   logout: () => Promise<void>;
-  resetPassword: (payload: {
-    email: string;
-    new_password: string;
-    hospital_or_staff_check?: string;
-  }) => Promise<string>;
+  resetPassword: (email: string) => Promise<string>;
   refreshUser: () => Promise<void>;
 }
 
@@ -161,7 +157,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setStoredToken(null);
         } else {
           setSession(data.session);
-          setStoredToken(data.session.access_token);
+          setStoredToken(null);
           const hydrated = await hydrateSupabaseUser(data.session);
           setUser(hydrated);
         }
@@ -212,7 +208,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return;
         }
         setSession(data.session);
-        setStoredToken(data.session.access_token);
+        setStoredToken(null);
         const hydrated = await hydrateSupabaseUser(data.session);
         if (mounted) {
           setUser(hydrated);
@@ -240,7 +236,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      setStoredToken(nextSession.access_token);
+      setStoredToken(null);
       if (event === 'TOKEN_REFRESHED') {
         return;
       }
@@ -273,7 +269,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           throw new Error(error?.message || 'Unable to sign in with Supabase.');
         }
         setSession(data.session);
-        setStoredToken(data.session.access_token);
+        setStoredToken(null);
         const hydrated = await hydrateSupabaseUser(data.session);
         if (!hydrated) {
           throw new Error('Unable to load user profile.');
@@ -321,7 +317,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           );
         }
         setSession(data.session);
-        setStoredToken(data.session.access_token);
+        setStoredToken(null);
         const hydrated = await hydrateSupabaseUser(data.session);
         if (!hydrated) {
           throw new Error('Account created, but profile hydration failed.');
@@ -357,13 +353,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [useSupabase]);
 
   const resetPassword = useCallback(
-    async (payload: {
-      email: string;
-      new_password: string;
-      hospital_or_staff_check?: string;
-    }): Promise<string> => {
+    async (email: string): Promise<string> => {
       if (useSupabase && supabase) {
-        const { error } = await supabase.auth.resetPasswordForEmail(payload.email, {
+        const normalizedEmail = email.trim().toLowerCase();
+        if (!normalizedEmail) {
+          throw new Error('Please enter your registered email address.');
+        }
+        const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
           redirectTo: `${window.location.origin}/login`,
         });
         if (error) {
@@ -372,8 +368,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return 'Password reset instructions have been sent to your registered email address.';
       }
 
-      const res = await api.auth.resetPassword(payload);
-      return res.message;
+      throw new Error(
+        'Self-service password reset is disabled in standalone mode. Contact your System Administrator or configure Supabase Auth email recovery.'
+      );
     },
     [useSupabase]
   );

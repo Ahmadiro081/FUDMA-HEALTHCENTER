@@ -20,7 +20,7 @@ const TOKEN_STORAGE_KEY = 'fudma_hc_token';
 
 export function getStoredToken(): string | null {
   try {
-    return localStorage.getItem(TOKEN_STORAGE_KEY);
+    return sessionStorage.getItem(TOKEN_STORAGE_KEY);
   } catch {
     return null;
   }
@@ -29,10 +29,12 @@ export function getStoredToken(): string | null {
 export function setStoredToken(token: string | null): void {
   try {
     if (token) {
-      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
     } else {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
     }
+    // Always purge any legacy localStorage token from prior sessions
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
   } catch {
     // Ignore storage errors in restricted contexts
   }
@@ -75,11 +77,6 @@ export const api = {
       }),
     logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
     me: () => request<{ user: AuthUser }>('/api/auth/me'),
-    resetPassword: (payload: { email: string; new_password: string; hospital_or_staff_check?: string }) =>
-      request<{ ok: boolean; message: string }>('/api/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
   },
   reference: {
     departments: () => request<{ departments: Department[] }>('/api/departments'),

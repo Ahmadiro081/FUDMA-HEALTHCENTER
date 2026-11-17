@@ -122,12 +122,23 @@ function todayDateStr(offsetDays = 0): string {
   return d.toISOString().slice(0, 10);
 }
 
+export const DEMO_USER_IDS = new Set([
+  'u1000000-0000-4000-8000-000000000001',
+  'u1000000-0000-4000-8000-000000000002',
+  'u1000000-0000-4000-8000-000000000003',
+  'u1000000-0000-4000-8000-000000000004',
+  'u1000000-0000-4000-8000-000000000005',
+  'u1000000-0000-4000-8000-000000000006',
+  'u1000000-0000-4000-8000-000000000007',
+  'u1000000-0000-4000-8000-000000000008',
+]);
+
 function createInitialSeed(): DatabaseState {
   const now = isoNow();
+  const isProd = process.env.NODE_ENV === 'production';
   const today = todayDateStr(0);
   const tomorrow = todayDateStr(1);
   const yesterday = todayDateStr(-1);
-  const defaultPassHash = hashPassword('Fudma@2026');
 
   const deptGopdId = 'd1000000-0000-4000-8000-000000000001';
   const deptNursId = 'd1000000-0000-4000-8000-000000000002';
@@ -187,6 +198,59 @@ function createInitialSeed(): DatabaseState {
       updated_at: now,
     },
   ];
+
+  const system_settings: SystemSettings = {
+    id: 'set10000-0000-4000-8000-000000000001',
+    hospital_name: 'FUDMA HEALTHCENTER',
+    institution_name: 'Federal University Dutsin-Ma',
+    clinic_hours: '08:00 - 18:00 (24/7 Emergency Triage)',
+    max_daily_appointments: 120,
+    allow_patient_cancellations: true,
+    appointment_slot_minutes: 30,
+    updated_at: now,
+  };
+
+  if (isProd) {
+    const prodUsers: StoredUser[] = [];
+    const initAdminEmail = process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase();
+    const initAdminPassword = process.env.INITIAL_ADMIN_PASSWORD;
+    if (initAdminEmail && initAdminPassword && initAdminPassword.length >= 12) {
+      prodUsers.push({
+        id: crypto.randomUUID(),
+        full_name: process.env.INITIAL_ADMIN_NAME?.trim() || 'System Administrator',
+        email: initAdminEmail,
+        phone: null,
+        gender: null,
+        date_of_birth: null,
+        address: 'FUDMA Healthcenter Administration',
+        is_active: true,
+        role: 'admin',
+        password_hash: hashPassword(initAdminPassword),
+        created_at: now,
+        updated_at: now,
+      });
+    }
+    return {
+      users: prodUsers,
+      departments,
+      patients: [],
+      doctors: [],
+      appointments: [],
+      vitals: [],
+      consultations: [],
+      laboratory_requests: [],
+      laboratory_results: [],
+      medications: [],
+      prescriptions: [],
+      prescription_items: [],
+      pharmacy_dispensing: [],
+      notifications: [],
+      activity_logs: [],
+      system_settings,
+    };
+  }
+
+  const defaultPassHash = hashPassword('Fudma@2026');
 
   const uAdminId = 'u1000000-0000-4000-8000-000000000001';
   const uDoc1Id = 'u1000000-0000-4000-8000-000000000002';
@@ -940,17 +1004,6 @@ function createInitialSeed(): DatabaseState {
       created_at: now,
     },
   ];
-
-  const system_settings: SystemSettings = {
-    id: 'set10000-0000-4000-8000-000000000001',
-    hospital_name: 'FUDMA HEALTHCENTER',
-    institution_name: 'Federal University Dutsin-Ma',
-    clinic_hours: '08:00 - 18:00 (24/7 Emergency Triage)',
-    max_daily_appointments: 120,
-    allow_patient_cancellations: true,
-    appointment_slot_minutes: 30,
-    updated_at: now,
-  };
 
   return {
     users,

@@ -4,8 +4,13 @@ import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
 
-export default defineConfig(() => {
+export default defineConfig(({command}) => {
   return {
+    define: {
+      __DEV_DEMO_ACCOUNTS__: JSON.stringify(
+        command === 'serve' && process.env.NODE_ENV !== 'production',
+      ),
+    },
     plugins: [
       react(),
       tailwindcss(),
