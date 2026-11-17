@@ -74,6 +74,17 @@ export interface StoredPrescription {
   updated_at: string;
 }
 
+export interface Group11WhitelistEntry {
+  id: string;
+  full_name: string;
+  matric_number: string;
+  department: string;
+  is_registered: boolean;
+  registered_user_id: string | null;
+  created_at: string;
+  registered_at: string | null;
+}
+
 export interface DatabaseState {
   users: StoredUser[];
   departments: Department[];
@@ -91,6 +102,69 @@ export interface DatabaseState {
   notifications: AppNotification[];
   activity_logs: ActivityLog[];
   system_settings: SystemSettings;
+  group11_student_whitelist: Group11WhitelistEntry[];
+}
+
+export function normalizeMatricNumber(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .replace(/\s+/g, '')
+    .toUpperCase();
+}
+
+export function createGroup11WhitelistSeed(now = isoNow()): Group11WhitelistEntry[] {
+  return [
+    {
+      id: 'g11-0001-0000-4000-8000-000000000001',
+      full_name: 'SALISU ABUBAKAR BAKORI',
+      matric_number: 'ENG/2024/32094',
+      department: 'Civil Engineering',
+      is_registered: false,
+      registered_user_id: null,
+      created_at: now,
+      registered_at: null,
+    },
+    {
+      id: 'g11-0002-0000-4000-8000-000000000002',
+      full_name: 'ABDULHAKEEM FARUK OLANIYI',
+      matric_number: 'ENG/2024/31802',
+      department: 'Mechanical Engineering',
+      is_registered: false,
+      registered_user_id: null,
+      created_at: now,
+      registered_at: null,
+    },
+    {
+      id: 'g11-0003-0000-4000-8000-000000000003',
+      full_name: 'ALI EZEKIEL ENEOJO',
+      matric_number: 'ENG/2024/31820',
+      department: 'Civil Engineering',
+      is_registered: false,
+      registered_user_id: null,
+      created_at: now,
+      registered_at: null,
+    },
+    {
+      id: 'g11-0004-0000-4000-8000-000000000004',
+      full_name: 'MUHAMMAD RAJI ABDULMUHAIMIN',
+      matric_number: 'ENG/2024/31747',
+      department: 'Mechatronics Engineering',
+      is_registered: false,
+      registered_user_id: null,
+      created_at: now,
+      registered_at: null,
+    },
+    {
+      id: 'g11-0005-0000-4000-8000-000000000005',
+      full_name: 'MOHAMMED MANDAJUMA IBRAHIM',
+      matric_number: 'ENG/2024/31911',
+      department: 'Mechanical Engineering',
+      is_registered: false,
+      registered_user_id: null,
+      created_at: now,
+      registered_at: null,
+    },
+  ];
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -247,6 +321,7 @@ function createInitialSeed(): DatabaseState {
       notifications: [],
       activity_logs: [],
       system_settings,
+      group11_student_whitelist: createGroup11WhitelistSeed(now),
     };
   }
 
@@ -1022,6 +1097,7 @@ function createInitialSeed(): DatabaseState {
     notifications,
     activity_logs,
     system_settings,
+    group11_student_whitelist: createGroup11WhitelistSeed(now),
   };
 }
 
@@ -1039,7 +1115,14 @@ export function loadDb(): DatabaseState {
   }
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
-    cachedState = JSON.parse(raw) as DatabaseState;
+    const parsed = JSON.parse(raw) as DatabaseState;
+    if (!Array.isArray(parsed.group11_student_whitelist)) {
+      parsed.group11_student_whitelist = createGroup11WhitelistSeed();
+      cachedState = parsed;
+      saveDb(cachedState);
+      return cachedState;
+    }
+    cachedState = parsed;
     return cachedState;
   } catch {
     cachedState = createInitialSeed();

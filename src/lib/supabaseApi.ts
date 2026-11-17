@@ -8,6 +8,7 @@ import type {
   DoctorRecord,
   LaboratoryRequest,
   LaboratoryResult,
+  MatricVerificationResult,
   Medication,
   PatientRecord,
   PatientVital,
@@ -335,6 +336,19 @@ function formatSupabaseError(error: { message: string } | null, fallback: string
 }
 
 export const supabaseApi = {
+  auth: {
+    async verifyMatric(matricNumber: string): Promise<MatricVerificationResult> {
+      const client = requireSupabase();
+      const norm = matricNumber.trim().replace(/\s+/g, '').toUpperCase();
+      const { data, error } = await client.rpc('rpc_verify_group11_matric', {
+        p_matric_number: norm,
+      });
+      if (error || !data) {
+        throw formatSupabaseError(error, 'Unable to verify matriculation number.');
+      }
+      return data as MatricVerificationResult;
+    },
+  },
   reference: {
     async departments(): Promise<{ departments: Department[] }> {
       const client = requireSupabase();
@@ -427,6 +441,7 @@ export const supabaseApi = {
           'matric_or_staff_id',
           'patient_category',
           'faculty_or_unit',
+          'full_name',
           'is_walk_in',
           'profile_id',
         ];
@@ -440,7 +455,7 @@ export const supabaseApi = {
       }
 
       const patientPatch: RawRow = {};
-      if (payload.full_name !== undefined && String(payload.full_name).trim()) {
+      if (actor.role !== 'patient' && payload.full_name !== undefined && String(payload.full_name).trim()) {
         patientPatch.full_name = String(payload.full_name).trim();
       }
       if (payload.phone !== undefined) patientPatch.phone = strOrNull(payload.phone);

@@ -312,3 +312,13 @@ export interface StaffAccountSummary {
   consultation_room?: string | null;
   created_at: string;
 }
+
+export interface MatricVerificationResult {
+  ok: boolean;
+  code: 'VERIFIED' | 'NOT_FOUND' | 'ALREADY_REGISTERED' | 'INVALID_FORMAT';
+  message?: string;
+  full_name?: string;
+  matric_number?: string;
+  department?: string;
+}
+

@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import type { Session } from '@supabase/supabase-js';
 import { api, getStoredToken, setStoredToken } from '../lib/api';
 import { isSupabaseConfigured, supabase } from '../lib/supabase';
-import type { AuthUser, DoctorRecord, PatientRecord, UserRole } from '../types/hospital';
+import type { AuthUser, DoctorRecord, MatricVerificationResult, PatientRecord, UserRole } from '../types/hospital';
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -10,7 +10,8 @@ interface AuthContextValue {
   loading: boolean;
   authMode: 'supabase' | 'local' | 'unconfigured';
   recoveryMode: boolean;
-  login: (email: string, password: string) => Promise<AuthUser>;
+  verifyMatric: (matricNumber: string) => Promise<MatricVerificationResult>;
+  login: (identifier: string, password: string) => Promise<AuthUser>;
   register: (payload: Record<string, unknown>) => Promise<AuthUser>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<string>;
@@ -310,16 +311,64 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [useSupabase, refreshUser]);
 
+  const verifyMatric = useCallback(
+    async (matricNumber: string): Promise<MatricVerificationResult> => {
+      if (authMode === 'unconfigured') {
+        throw new Error(
+          'Production Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+        );
+      }
+      return api.auth.verifyMatric(matricNumber);
+    },
+    [authMode]
+  );
+
   const login = useCallback(
-    async (email: string, password: string): Promise<AuthUser> => {
+    async (identifier: string, password: string): Promise<AuthUser> => {
+      const trimmedIdentifier = identifier.trim();
+      if (!trimmedIdentifier || !password) {
+        throw new Error('Matriculation number (or email) and password are required.');
+      }
+
       if (useSupabase && supabase) {
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error || !data.session) {
-          throw new Error(error?.message || 'Unable to sign in with Supabase.');
+        let activeSession: Session | null = null;
+
+        if (trimmedIdentifier.includes('@')) {
+          const { data, error } = await supabase.auth.signInWithPassword({
+            email: trimmedIdentifier.toLowerCase(),
+            password,
+          });
+          if (error || !data.session) {
+            throw new Error(error?.message || 'Unable to sign in with Supabase.');
+          }
+          activeSession = data.session;
+        } else {
+          // Matriculation number login: server resolves registered user email from whitelist and authenticates through Supabase Auth
+          const res = await fetch('/api/auth/login-matric', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifier: trimmedIdentifier, password }),
+          });
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            session?: { access_token?: string; refresh_token?: string };
+          };
+          if (!res.ok || !body.session?.access_token || !body.session?.refresh_token) {
+            throw new Error(body.error || 'Invalid matriculation number or password.');
+          }
+          const { data: sessData, error: sessErr } = await supabase.auth.setSession({
+            access_token: body.session.access_token,
+            refresh_token: body.session.refresh_token,
+          });
+          if (sessErr || !sessData.session) {
+            throw new Error(sessErr?.message || 'Unable to establish authenticated Supabase session.');
+          }
+          activeSession = sessData.session;
         }
-        setSession(data.session);
+
+        setSession(activeSession);
         setStoredToken(null);
-        const hydrated = await hydrateSupabaseUser(data.session);
+        const hydrated = await hydrateSupabaseUser(activeSession);
         if (!hydrated) {
           throw new Error('Unable to load user profile.');
         }
@@ -338,7 +387,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         );
       }
 
-      const res = await api.auth.login(email, password);
+      const res = await api.auth.login(trimmedIdentifier, password);
       setStoredToken(res.token);
       setUser(res.user);
       return res.user;
@@ -348,6 +397,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const register = useCallback(
     async (payload: Record<string, unknown>): Promise<AuthUser> => {
+      const normalizedMatric = String(payload.matric_or_staff_id || '')
+        .trim()
+        .replace(/\s+/g, '')
+        .toUpperCase();
+      if (!normalizedMatric) {
+        throw new Error('Please verify your Group 11 matriculation number before creating an account.');
+      }
+
       if (useSupabase && supabase) {
         const email = String(payload.email || '').trim().toLowerCase();
         const password = String(payload.password || '');
@@ -362,8 +419,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               gender: payload.gender,
               date_of_birth: payload.date_of_birth,
               address: payload.address,
-              matric_or_staff_id: payload.matric_or_staff_id,
-              patient_category: payload.patient_category || 'Student',
+              matric_or_staff_id: normalizedMatric,
+              patient_category: 'Student',
               faculty_or_unit: payload.faculty_or_unit,
               blood_group: payload.blood_group || 'Unknown',
               genotype: payload.genotype || 'Unknown',
@@ -397,7 +454,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         );
       }
 
-      const res = await api.auth.register(payload);
+      const res = await api.auth.register({
+        ...payload,
+        matric_or_staff_id: normalizedMatric,
+      });
       setStoredToken(res.token);
       setUser(res.user);
       return res.user;
@@ -479,6 +539,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         authMode,
         recoveryMode,
+        verifyMatric,
         login,
         register,
         logout,

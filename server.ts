@@ -10,11 +10,13 @@ import {
   enrichPatient,
   hashPassword,
   loadDb,
+  normalizeMatricNumber,
   saveDb,
   verifyPassword,
   type StoredUser,
 } from './server/db.ts';
 import { provisionSupabaseStaff } from './api/admin/staff.ts';
+import { loginWithMatricOrEmail } from './api/auth/login-matric.ts';
 import type {
   AppointmentStatus,
   AuthUser,
@@ -346,7 +348,10 @@ async function startServer(): Promise<void> {
 
   // Disable all local JSON hospital routes in production unless explicitly opted into demo mode
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
-    if (req.path === '/admin/staff' && (req.method === 'POST' || req.method === 'OPTIONS')) {
+    if (
+      (req.path === '/admin/staff' && (req.method === 'POST' || req.method === 'OPTIONS')) ||
+      req.path === '/auth/login-matric'
+    ) {
       next();
       return;
     }
@@ -362,7 +367,8 @@ async function startServer(): Promise<void> {
   const loginLimiter = createRateLimiter({
     windowMs: 15 * 60 * 1000,
     max: 10,
-    keyFn: (req) => `${getClientIp(req)}:${String(req.body?.email || '').trim().toLowerCase()}`,
+    keyFn: (req) =>
+      `${getClientIp(req)}:${String(req.body?.identifier || req.body?.email || req.body?.matric_number || '').trim().toLowerCase()}`,
     message: 'Too many sign-in attempts for this account. Please wait 15 minutes and try again.',
   });
 
@@ -387,13 +393,67 @@ async function startServer(): Promise<void> {
     message: 'Too many registration attempts from this address. Please try again later.',
   });
 
-  // =========================================================================
-  // AUTHENTICATION ENDPOINTS
-  // =========================================================================
+  const verifyMatricLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    keyFn: (req) => `verify:${getClientIp(req)}`,
+    message: 'Too many matriculation verification attempts. Please wait a few minutes and try again.',
+  });
+
+  // Supabase Auth matriculation/email login adapter (used in production & Supabase dev mode)
+  app.all('/api/auth/login-matric', (req: Request, res: Response, next: NextFunction) => {
+    void loginWithMatricOrEmail(req, res).catch(next);
+  });
+
+  // Group 11 Step 1 Matriculation Verification (local dev store)
+  app.post('/api/auth/verify-matric', verifyMatricLimiter, (req: Request, res: Response) => {
+    const normMatric = normalizeMatricNumber(req.body?.matric_number);
+    if (!normMatric || !/^[A-Z0-9]+\/\d{4}\/\d+$/.test(normMatric)) {
+      res.json({
+        ok: false,
+        code: 'INVALID_FORMAT',
+        message:
+          'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.',
+      });
+      return;
+    }
+
+    const db = loadDb();
+    const wl = db.group11_student_whitelist.find(
+      (entry) => normalizeMatricNumber(entry.matric_number) === normMatric
+    );
+
+    if (!wl) {
+      res.json({
+        ok: false,
+        code: 'NOT_FOUND',
+        message:
+          'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.',
+      });
+      return;
+    }
+
+    if (wl.is_registered || wl.registered_user_id) {
+      res.json({
+        ok: false,
+        code: 'ALREADY_REGISTERED',
+        message:
+          'This matriculation number has already been registered. Please sign in with your matriculation number and password.',
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      code: 'VERIFIED',
+      full_name: wl.full_name,
+      matric_number: wl.matric_number,
+      department: wl.department,
+    });
+  });
 
   app.post('/api/auth/register', registerLimiter, (req: Request, res: Response) => {
     const {
-      full_name,
       email,
       password,
       phone,
@@ -401,8 +461,6 @@ async function startServer(): Promise<void> {
       date_of_birth,
       address,
       matric_or_staff_id,
-      patient_category,
-      faculty_or_unit,
       blood_group,
       genotype,
       allergies,
@@ -416,8 +474,35 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    if (!full_name || !email || !password) {
-      res.status(400).json({ error: 'Full name, email, and password are required.' });
+    const normMatric = normalizeMatricNumber(matric_or_staff_id);
+    if (!normMatric) {
+      res.status(403).json({
+        error:
+          'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.',
+      });
+      return;
+    }
+
+    const db = loadDb();
+    const wl = db.group11_student_whitelist.find(
+      (entry) => normalizeMatricNumber(entry.matric_number) === normMatric
+    );
+    if (!wl) {
+      res.status(403).json({
+        error:
+          'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.',
+      });
+      return;
+    }
+    if (wl.is_registered || wl.registered_user_id) {
+      res.status(409).json({
+        error: `This matriculation number (${wl.matric_number}) has already been registered. Please sign in instead.`,
+      });
+      return;
+    }
+
+    if (!email || !password) {
+      res.status(400).json({ error: 'Email address and password are required.' });
       return;
     }
     const normalizedEmail = String(email).trim().toLowerCase();
@@ -438,10 +523,6 @@ async function startServer(): Promise<void> {
       res.status(400).json({ error: 'Invalid gender selection.' });
       return;
     }
-    if (patient_category && !ALLOWED_CATEGORIES.has(String(patient_category))) {
-      res.status(400).json({ error: 'Invalid patient category selection.' });
-      return;
-    }
     if (blood_group && !ALLOWED_BLOOD_GROUPS.has(String(blood_group))) {
       res.status(400).json({ error: 'Invalid blood group selection.' });
       return;
@@ -451,7 +532,6 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const db = loadDb();
     if (db.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
       res.status(409).json({ error: 'An account with this email already exists.' });
       return;
@@ -459,10 +539,10 @@ async function startServer(): Promise<void> {
 
     const now = new Date().toISOString();
     const userId = crypto.randomUUID();
-    // SECURITY INVARIANT: Public registration strictly assigns 'patient' role only.
+    // SECURITY INVARIANT: Identity fields come strictly from the verified Group 11 whitelist record; role is always 'patient'.
     const newUser: StoredUser = {
       id: userId,
-      full_name: String(full_name).trim(),
+      full_name: wl.full_name,
       email: normalizedEmail,
       phone: phone ? String(phone).trim() : null,
       gender: gender || null,
@@ -480,16 +560,16 @@ async function startServer(): Promise<void> {
       id: crypto.randomUUID(),
       profile_id: userId,
       hospital_number: hospNum,
-      matric_or_staff_id: matric_or_staff_id ? String(matric_or_staff_id).trim() : null,
-      patient_category: (patient_category || 'Student') as 'Student' | 'Staff' | 'Dependent' | 'Community',
-      faculty_or_unit: faculty_or_unit ? String(faculty_or_unit).trim() : null,
+      matric_or_staff_id: wl.matric_number,
+      patient_category: 'Student' as const,
+      faculty_or_unit: wl.department,
       blood_group: blood_group || 'Unknown',
       genotype: genotype || 'Unknown',
       allergies: allergies ? String(allergies).trim() : 'None reported',
       emergency_contact_name: emergency_contact_name ? String(emergency_contact_name).trim() : null,
       emergency_contact_phone: emergency_contact_phone ? String(emergency_contact_phone).trim() : null,
       is_walk_in: false,
-      full_name: newUser.full_name,
+      full_name: wl.full_name,
       email: newUser.email,
       phone: newUser.phone,
       gender: newUser.gender,
@@ -499,22 +579,26 @@ async function startServer(): Promise<void> {
       updated_at: now,
     };
 
+    wl.is_registered = true;
+    wl.registered_user_id = userId;
+    wl.registered_at = now;
+
     db.users.push(newUser);
     db.patients.push(newPatient);
     addNotification(db, {
       recipient_user_id: userId,
       title: 'Welcome to FUDMA HEALTHCENTER',
-      message: `Your patient file (${hospNum}) has been created. You can now book appointments online.`,
+      message: `Your verified student patient file (${hospNum}) for ${wl.matric_number} is active.`,
       category: 'account',
     });
     addActivityLog(db, {
       actor_id: userId,
-      actor_name: newUser.full_name,
+      actor_name: wl.full_name,
       actor_role: 'patient',
-      action: 'PATIENT_REGISTERED',
+      action: 'GROUP11_PATIENT_REGISTERED',
       entity_type: 'patient',
       entity_id: hospNum,
-      details: 'Public patient account registration completed.',
+      details: `Verified Group 11 registration completed for ${wl.matric_number} (${wl.department}).`,
     });
     saveDb(db);
 
@@ -524,15 +608,35 @@ async function startServer(): Promise<void> {
   });
 
   app.post('/api/auth/login', loginIpLimiter, loginLimiter, (req: Request, res: Response) => {
-    const { email, password } = req.body ?? {};
-    if (!email || !password) {
-      res.status(400).json({ error: 'Email and password are required.' });
+    const rawIdentifier = String(
+      req.body?.identifier ?? req.body?.email ?? req.body?.matric_number ?? ''
+    ).trim();
+    const password = String(req.body?.password ?? '');
+    if (!rawIdentifier || !password) {
+      res.status(400).json({ error: 'Matriculation number (or email) and password are required.' });
       return;
     }
+
     const db = loadDb();
-    const user = db.users.find((u) => u.email.toLowerCase() === String(email).trim().toLowerCase());
-    if (!user || !verifyPassword(String(password), user.password_hash)) {
-      res.status(401).json({ error: 'Invalid email or password.' });
+    const isEmail = rawIdentifier.includes('@');
+    let user: StoredUser | undefined;
+
+    if (isEmail) {
+      user = db.users.find((u) => u.email.toLowerCase() === rawIdentifier.toLowerCase());
+    } else {
+      const normMatric = normalizeMatricNumber(rawIdentifier);
+      const wl = db.group11_student_whitelist.find(
+        (entry) => normalizeMatricNumber(entry.matric_number) === normMatric
+      );
+      if (wl && wl.is_registered && wl.registered_user_id) {
+        user = db.users.find((u) => u.id === wl.registered_user_id);
+      }
+    }
+
+    if (!user || !verifyPassword(password, user.password_hash)) {
+      res.status(401).json({
+        error: isEmail ? 'Invalid email or password.' : 'Invalid matriculation number or password.',
+      });
       return;
     }
     if (!user.is_active) {
@@ -713,6 +817,7 @@ async function startServer(): Promise<void> {
         'matric_or_staff_id',
         'patient_category',
         'faculty_or_unit',
+        'full_name',
         'is_walk_in',
         'profile_id',
       ];
@@ -748,7 +853,7 @@ async function startServer(): Promise<void> {
     }
 
     const now = new Date().toISOString();
-    if (full_name) pat.full_name = String(full_name).trim();
+    if (full_name && user.role !== 'patient') pat.full_name = String(full_name).trim();
     if (phone !== undefined) pat.phone = phone ? String(phone).trim() : null;
     if (gender !== undefined) pat.gender = gender || null;
     if (date_of_birth !== undefined) pat.date_of_birth = date_of_birth || null;
@@ -768,7 +873,7 @@ async function startServer(): Promise<void> {
     if (pat.profile_id) {
       const prof = db.users.find((u) => u.id === pat.profile_id);
       if (prof) {
-        if (full_name) prof.full_name = pat.full_name;
+        if (full_name && user.role !== 'patient') prof.full_name = pat.full_name;
         if (phone !== undefined) prof.phone = pat.phone;
         if (gender !== undefined) prof.gender = pat.gender;
         if (date_of_birth !== undefined) prof.date_of_birth = pat.date_of_birth;

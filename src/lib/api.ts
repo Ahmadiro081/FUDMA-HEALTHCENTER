@@ -9,6 +9,7 @@ import type {
   Department,
   DoctorRecord,
   LaboratoryRequest,
+  MatricVerificationResult,
   Medication,
   PatientRecord,
   PatientVital,
@@ -82,15 +83,22 @@ async function localRequest<T>(path: string, options: RequestInit = {}): Promise
 
 export const api = {
   auth: {
+    verifyMatric: (matricNumber: string): Promise<MatricVerificationResult> =>
+      isSupabaseConfigured()
+        ? supabaseApi.auth.verifyMatric(matricNumber)
+        : localRequest<MatricVerificationResult>('/api/auth/verify-matric', {
+            method: 'POST',
+            body: JSON.stringify({ matric_number: matricNumber }),
+          }),
     register: (payload: Record<string, unknown>) =>
       localRequest<{ token: string; user: AuthUser }>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    login: (email: string, password: string) =>
+    login: (identifier: string, password: string) =>
       localRequest<{ token: string; user: AuthUser }>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ identifier, email: identifier, password }),
       }),
     logout: () => localRequest<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
     me: () => localRequest<{ user: AuthUser }>('/api/auth/me'),

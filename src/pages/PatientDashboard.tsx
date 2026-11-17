@@ -201,7 +201,15 @@ export function PatientDashboard() {
     if (!user?.patient?.id) return;
     setSavingProfile(true);
     try {
-      await api.patients.update(user.patient.id, profileForm);
+      await api.patients.update(user.patient.id, {
+        phone: profileForm.phone,
+        address: profileForm.address,
+        blood_group: profileForm.blood_group,
+        genotype: profileForm.genotype,
+        allergies: profileForm.allergies,
+        emergency_contact_name: profileForm.emergency_contact_name,
+        emergency_contact_phone: profileForm.emergency_contact_phone,
+      });
       await refreshUser();
       showToast('Personal & medical profile updated', 'success');
     } catch (err) {
@@ -757,13 +765,14 @@ export function PatientDashboard() {
 
               <form onSubmit={handleSaveProfile} className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Full Name</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Full Name (Verified Identity)
+                  </label>
                   <input
                     type="text"
-                    required
+                    readOnly
                     value={profileForm.full_name}
-                    onChange={(e) => setProfileForm((p) => ({ ...p, full_name: e.target.value }))}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
+                    className="w-full rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm text-slate-700 cursor-not-allowed focus:outline-none"
                   />
                 </div>
                 <div>

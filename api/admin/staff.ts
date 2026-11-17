@@ -263,6 +263,9 @@ export async function provisionSupabaseStaff(
     email: normalizedEmail,
     password,
     email_confirm: true,
+    app_metadata: {
+      account_origin: 'admin_staff',
+    },
     user_metadata: {
       full_name: fullName,
       phone,
