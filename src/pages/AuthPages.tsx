@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -8,10 +8,12 @@ import {
   Cross,
   Eye,
   EyeOff,
+  HelpCircle,
   Lock,
   ShieldAlert,
   ShieldCheck,
   UserPlus,
+  X,
 } from 'lucide-react';
 import { getRoleDashboardPath, useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
@@ -43,6 +45,18 @@ export function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [showDemos, setShowDemos] = useState(false);
+  const [showAdminHelpModal, setShowAdminHelpModal] = useState(false);
+
+  useEffect(() => {
+    if (!showAdminHelpModal) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowAdminHelpModal(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showAdminHelpModal]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -158,11 +172,24 @@ export function LoginPage() {
             </button>
           </form>
 
-          <div className="mt-5 pt-5 border-t border-slate-200 flex items-center justify-between text-xs">
-            <span className="text-slate-600">Approved Group 11 student?</span>
-            <Link to="/register" className="font-semibold text-[#0F4C81] hover:underline">
-              Create Patient Account
-            </Link>
+          <div className="mt-5 pt-5 border-t border-slate-200 space-y-2.5 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-600">Approved Group 11 student?</span>
+              <Link to="/register" className="font-semibold text-[#0F4C81] hover:underline whitespace-nowrap shrink-0">
+                Create Patient Account
+              </Link>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-600">Administrative staff needing help?</span>
+              <button
+                type="button"
+                onClick={() => setShowAdminHelpModal(true)}
+                className="inline-flex items-center gap-1 font-semibold text-[#0F4C81] hover:underline whitespace-nowrap shrink-0"
+              >
+                <HelpCircle className="w-3.5 h-3.5" />
+                <span>Staff Access Help</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -203,6 +230,111 @@ export function LoginPage() {
           </div>
         )}
       </div>
+
+      {showAdminHelpModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="admin-help-modal-title"
+          onClick={() => setShowAdminHelpModal(false)}
+        >
+          <div
+            className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl border border-slate-200 bg-white p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-200">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-lg bg-[#0F4C81] text-white flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 id="admin-help-modal-title" className="text-lg font-bold text-slate-900">
+                    Administrative Staff Credential Recovery
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    FUDMA HEALTHCENTER · Internal Access Support
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdminHelpModal(false)}
+                aria-label="Close staff access help modal"
+                className="rounded-lg p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-5 text-sm text-slate-600 leading-relaxed">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  01. Recovering a Forgotten Staff Password
+                </h3>
+                <p className="mt-1 text-xs text-slate-600 leading-relaxed">
+                  If you know your assigned institutional email address, use the{' '}
+                  <span className="font-semibold text-slate-800">Account Password Recovery</span> page to request a
+                  verified reset link. Open the link from your official inbox to set a new password.
+                </p>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  02. Forgotten Login Email or First-Time Provisioning
+                </h3>
+                <p className="mt-1 text-xs text-slate-600 leading-relaxed">
+                  Internal staff and departmental administrator accounts are provisioned strictly by authorized clinic
+                  leadership rather than public sign-up. If you do not recall your registered institutional email or
+                  username, contact the <span className="font-semibold text-slate-800">Super Administrator</span> or{' '}
+                  <span className="font-semibold text-slate-800">Hospital ICT Desk</span> with your staff ID for
+                  identity verification and credential re-issuance.
+                </p>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  03. Executive &amp; Super Administrator Accounts
+                </h3>
+                <p className="mt-1 text-xs text-slate-600 leading-relaxed">
+                  Privileged administrative identities cannot be modified or reset by other staff members. To regain
+                  access, use the verified email recovery workflow with your registered executive email, or coordinate
+                  directly with your designated <span className="font-semibold text-slate-800">ICT Governance Lead</span>{' '}
+                  for authorized server-side verification.
+                </p>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  04. Temporary Sign-In Lockouts &amp; Inactive Accounts
+                </h3>
+                <p className="mt-1 text-xs text-slate-600 leading-relaxed">
+                  Repeated unsuccessful sign-in attempts automatically pause access for 15 minutes to protect clinical
+                  records. If your account was deactivated after a role change, ask an authorized administrator to
+                  confirm your active status.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-slate-200 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setShowAdminHelpModal(false)}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+              >
+                Close
+              </button>
+              <Link
+                to="/reset-password"
+                onClick={() => setShowAdminHelpModal(false)}
+                className="inline-flex items-center justify-center rounded-lg bg-[#0F4C81] px-4 py-2 text-xs font-semibold text-white hover:bg-[#0369A1] transition-colors whitespace-nowrap shrink-0"
+              >
+                Go to Password Recovery
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
