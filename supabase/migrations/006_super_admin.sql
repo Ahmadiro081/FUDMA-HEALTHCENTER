@@ -3,9 +3,9 @@
 -- Migration: 006_super_admin.sql
 -- Purpose:
 --   1. Support 'super_admin' role & immutable public.privileged_accounts registry
---   2. Isolate ENG/2012/0001 from group11_student_whitelist (never whitelisted)
+--   2. Isolate ENG/2011/0001 from group11_student_whitelist (never whitelisted)
 --   3. Allow account_origin = 'super_admin_provision' in handle_new_user() while
---      strictly blocking ENG/2012/0001 on public self-registration
+--      strictly blocking ENG/2011/0001 on public self-registration
 --   4. Prevent any ordinary admin or student from modifying, suspending,
 --      demoting, or deleting the Super Admin account
 --   5. Upgrade RLS policies, protection triggers, and all 10 transactional RPCs
@@ -130,7 +130,7 @@ AS $$
 DECLARE
   v_norm TEXT := public.normalize_matric_number(NEW.matric_number);
 BEGIN
-  IF v_norm = 'ENG/2012/0001' OR EXISTS (
+  IF v_norm = 'ENG/2011/0001' OR EXISTS (
     SELECT 1 FROM public.privileged_accounts
     WHERE public.normalize_matric_number(login_username) = v_norm
   ) THEN
@@ -288,7 +288,7 @@ CREATE TRIGGER trg_protect_profiles
   BEFORE UPDATE OR DELETE ON public.profiles
   FOR EACH ROW EXECUTE FUNCTION public.trg_fn_protect_profiles();
 
--- 6b. Update Step-1 matriculation verification RPC so ENG/2012/0001 is explicitly
+-- 6b. Update Step-1 matriculation verification RPC so ENG/2011/0001 is explicitly
 --     recognised as the designated Initial Super Administrator identity and exempted
 --     from Group 11 patient whitelist self-registration without auto-creating any account.
 CREATE OR REPLACE FUNCTION public.rpc_verify_group11_matric(p_matric_number TEXT)
@@ -312,7 +312,7 @@ BEGIN
     );
   END IF;
 
-  IF v_norm = 'ENG/2012/0001' OR EXISTS (
+  IF v_norm = 'ENG/2011/0001' OR EXISTS (
     SELECT 1 FROM public.privileged_accounts
     WHERE public.normalize_matric_number(login_username) = v_norm
   ) THEN
@@ -334,9 +334,9 @@ BEGIN
       'is_provisioned', v_is_provisioned,
       'message', CASE
         WHEN v_is_provisioned THEN
-          'ENG/2012/0001 is the designated Initial Super Administrator identity and has already been provisioned. Please sign in through Portal Sign In with your credentials.'
+          'ENG/2011/0001 is the designated Initial Super Administrator identity and has already been provisioned. Please sign in through Portal Sign In with your credentials.'
         ELSE
-          'ENG/2012/0001 is recognised as the designated Initial Super Administrator identity. Complete the Initial Super Administrator registration form below to provision your account securely.'
+          'ENG/2011/0001 is recognised as the designated Initial Super Administrator identity. Complete the Initial Super Administrator registration form below to provision your account securely.'
       END
     );
   END IF;
@@ -377,7 +377,7 @@ REVOKE ALL ON FUNCTION public.rpc_verify_group11_matric(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.rpc_verify_group11_matric(TEXT) TO anon, authenticated;
 
 -- 7. Update handle_new_user() trigger to support server-only 'super_admin_provision' origin
---    while continuing strict Group 11 enforcement on all public signups (explicitly blocking ENG/2012/0001).
+--    while continuing strict Group 11 enforcement on all public signups (explicitly blocking ENG/2011/0001).
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -444,7 +444,7 @@ BEGIN
     RAISE EXCEPTION 'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.';
   END IF;
 
-  IF v_norm_matric = 'ENG/2012/0001' OR EXISTS (
+  IF v_norm_matric = 'ENG/2011/0001' OR EXISTS (
     SELECT 1 FROM public.privileged_accounts
     WHERE public.normalize_matric_number(login_username) = v_norm_matric
   ) THEN

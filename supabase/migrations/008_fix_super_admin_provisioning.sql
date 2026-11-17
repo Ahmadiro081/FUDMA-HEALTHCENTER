@@ -350,7 +350,7 @@ BEGIN
     RAISE EXCEPTION 'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.';
   END IF;
 
-  IF v_norm_matric = 'ENG/2012/0001' OR EXISTS (
+  IF v_norm_matric = 'ENG/2011/0001' OR EXISTS (
     SELECT 1 FROM public.privileged_accounts
     WHERE public.normalize_matric_number(login_username) = v_norm_matric
   ) THEN
@@ -465,7 +465,7 @@ CREATE OR REPLACE FUNCTION public.rpc_finalize_super_admin_provision(
   p_full_name TEXT,
   p_email TEXT,
   p_phone TEXT DEFAULT NULL,
-  p_login_username TEXT DEFAULT 'ENG/2012/0001',
+  p_login_username TEXT DEFAULT 'ENG/2011/0001',
   p_account_type TEXT DEFAULT 'Privileged Administrative Account'
 )
 RETURNS JSONB
@@ -486,22 +486,24 @@ BEGIN
     RAISE EXCEPTION 'User ID, full name, and email are required for Super Admin provisioning.';
   END IF;
 
-  IF v_norm_username <> 'ENG/2012/0001' THEN
-    RAISE EXCEPTION 'Initial Super Admin login username is restricted exclusively to ENG/2012/0001.';
+  IF v_norm_username <> 'ENG/2011/0001' THEN
+    RAISE EXCEPTION 'Initial Super Admin login username is restricted exclusively to ENG/2011/0001.';
   END IF;
 
   PERFORM pg_advisory_xact_lock(hashtext('fudma_super_admin_provision'));
 
-  IF EXISTS (SELECT 1 FROM public.privileged_accounts)
-     OR EXISTS (SELECT 1 FROM public.user_roles WHERE role = 'super_admin') THEN
-    RAISE EXCEPTION 'Super Admin (ENG/2012/0001) has already been provisioned and cannot be duplicated.';
+  IF EXISTS (
+    SELECT 1 FROM public.privileged_accounts
+    WHERE public.normalize_matric_number(login_username) = 'ENG/2011/0001'
+  ) OR EXISTS (SELECT 1 FROM public.user_roles WHERE role = 'super_admin') THEN
+    RAISE EXCEPTION 'Super Admin (ENG/2011/0001) has already been provisioned and cannot be duplicated.';
   END IF;
 
   IF EXISTS (
     SELECT 1 FROM public.group11_student_whitelist
     WHERE public.normalize_matric_number(matric_number) = v_norm_username
   ) THEN
-    RAISE EXCEPTION 'ENG/2012/0001 must never exist in group11_student_whitelist.';
+    RAISE EXCEPTION 'ENG/2011/0001 must never exist in group11_student_whitelist.';
   END IF;
 
   DELETE FROM public.patients WHERE profile_id = p_user_id;
@@ -566,8 +568,8 @@ GRANT EXECUTE ON FUNCTION public.rpc_finalize_super_admin_provision(UUID, TEXT, 
 
 -- 8. Diagnostic verification summary (displayed in Supabase SQL Editor)
 SELECT
-  (SELECT COUNT(*) FROM auth.users WHERE LOWER(email) = 'ahmadcybro@gmail.com') AS auth_users_for_email,
-  (SELECT COUNT(*) FROM public.profiles WHERE LOWER(email) = 'ahmadcybro@gmail.com') AS profiles_for_email,
+  (SELECT COUNT(*) FROM auth.users WHERE LOWER(email) = 'i.ahmad22044@fudutsinma.edu.ng') AS auth_users_for_email,
+  (SELECT COUNT(*) FROM public.profiles WHERE LOWER(email) = 'i.ahmad22044@fudutsinma.edu.ng') AS profiles_for_email,
   (SELECT COUNT(*) FROM public.user_roles WHERE role = 'super_admin') AS super_admin_roles,
   (SELECT COUNT(*) FROM public.privileged_accounts) AS privileged_accounts,
   (SELECT COUNT(*) FROM public.group11_student_whitelist) AS group11_whitelist_count,

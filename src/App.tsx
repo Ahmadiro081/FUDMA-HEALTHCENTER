@@ -11,6 +11,7 @@ import { LandingPage } from './pages/LandingPage';
 import { NursingDashboard } from './pages/NursingDashboard';
 import { PatientDashboard } from './pages/PatientDashboard';
 import { PharmacyDashboard } from './pages/PharmacyDashboard';
+import { SetupSuperAdminPage } from './pages/SetupSuperAdminPage';
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/admin-login" element={<AdminLoginPage />} />
+            <Route path="/setup-super-admin" element={<SetupSuperAdminPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/reset-password" element={<ResetPasswordPage />} />
 

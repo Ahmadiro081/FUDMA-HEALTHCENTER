@@ -75,7 +75,7 @@ BEGIN
     RAISE EXCEPTION 'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.';
   END IF;
 
-  IF v_norm_matric = 'ENG/2012/0001' OR EXISTS (
+  IF v_norm_matric = 'ENG/2011/0001' OR EXISTS (
     SELECT 1 FROM public.privileged_accounts
     WHERE public.normalize_matric_number(login_username) = v_norm_matric
   ) THEN

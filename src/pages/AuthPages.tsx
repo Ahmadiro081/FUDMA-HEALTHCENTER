@@ -352,23 +352,14 @@ interface VerifiedGroup11Student {
 }
 
 export function RegisterPage() {
-  const { verifyMatric, register, registerSuperAdmin, authMode } = useAuth();
+  const { verifyMatric, register, authMode } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
 
   const [matricInput, setMatricInput] = useState('');
   const [verifying, setVerifying] = useState(false);
   const [verifiedStudent, setVerifiedStudent] = useState<VerifiedGroup11Student | null>(null);
-  const [superAdminSetupUnlocked, setSuperAdminSetupUnlocked] = useState(false);
-
-  const [superAdminForm, setSuperAdminForm] = useState({
-    full_name: 'Ahmad Ibrahim',
-    email: 'i.ahmad22044@fudutsinma.edu.ng',
-    password: '',
-    confirm_password: '',
-    provision_secret: '',
-  });
-  const [showSuperAdminPass, setShowSuperAdminPass] = useState(false);
+  const [superAdminSetupAvailable, setSuperAdminSetupAvailable] = useState(false);
 
   const [form, setForm] = useState({
     email: '',
@@ -393,16 +384,12 @@ export function RegisterPage() {
     setForm((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleSuperAdminChange = (field: string, value: string) => {
-    setSuperAdminForm((prev) => ({ ...prev, [field]: value }));
-  };
-
   const handleVerifyMatric = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setVerificationNotice('');
     setSuperAdminNotice('');
-    setSuperAdminSetupUnlocked(false);
+    setSuperAdminSetupAvailable(false);
     const candidate = matricInput.trim().replace(/\s+/g, '').toUpperCase();
     if (!candidate) {
       setError('Please enter your matriculation number to verify eligibility.');
@@ -415,15 +402,16 @@ export function RegisterPage() {
       if (result.code === 'PRIVILEGED_SUPER_ADMIN') {
         setVerifiedStudent(null);
         if (result.is_provisioned) {
-          setSuperAdminSetupUnlocked(false);
+          setSuperAdminSetupAvailable(false);
           setSuperAdminNotice(
             result.message ||
               'ENG/2011/0001 is the designated Initial Super Administrator identity and has already been provisioned. Please sign in through /admin-login with your credentials.'
           );
         } else {
-          setMatricInput('ENG/2011/0001');
-          setSuperAdminSetupUnlocked(true);
-          showToast('Designated Super Administrator identity verified', 'success');
+          setSuperAdminSetupAvailable(true);
+          setSuperAdminNotice(
+            'ENG/2011/0001 is reserved for the designated Super Administrator account. Complete one-time provisioning through the secure /setup-super-admin workflow.'
+          );
         }
         return;
       }
@@ -446,7 +434,7 @@ export function RegisterPage() {
       showToast('Matriculation number verified for Group 11 registration', 'success');
     } catch (err) {
       setVerifiedStudent(null);
-      setSuperAdminSetupUnlocked(false);
+      setSuperAdminSetupAvailable(false);
       setError(
         err instanceof Error
           ? err.message
@@ -459,58 +447,10 @@ export function RegisterPage() {
 
   const handleResetVerification = () => {
     setVerifiedStudent(null);
-    setSuperAdminSetupUnlocked(false);
+    setSuperAdminSetupAvailable(false);
     setError('');
     setVerificationNotice('');
     setSuperAdminNotice('');
-  };
-
-  const handleSuperAdminSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    if (!superAdminSetupUnlocked) {
-      setError('Please verify ENG/2011/0001 first.');
-      return;
-    }
-    if (!superAdminForm.full_name.trim() || !superAdminForm.email.trim()) {
-      setError('Full name and email address are required.');
-      return;
-    }
-    if (superAdminForm.password.length < 8) {
-      setError('Super Admin password must be at least 8 characters.');
-      return;
-    }
-    if (superAdminForm.password !== superAdminForm.confirm_password) {
-      setError('Passwords do not match.');
-      return;
-    }
-    if (!superAdminForm.provision_secret.trim()) {
-      setError('Server Super Admin provisioning secret is required.');
-      return;
-    }
-
-    setSubmitting(true);
-    setVerificationNotice('');
-    try {
-      const outcome = await registerSuperAdmin({
-        full_name: superAdminForm.full_name.trim(),
-        email: superAdminForm.email.trim().toLowerCase(),
-        password: superAdminForm.password,
-        provision_secret: superAdminForm.provision_secret.trim(),
-      });
-      if (outcome.user) {
-        showToast(`Welcome, ${outcome.user.full_name} (Super Administrator)`, 'success');
-        navigate(getRoleDashboardPath(outcome.user.role), { replace: true });
-      } else {
-        setSuperAdminSetupUnlocked(false);
-        setVerificationNotice(outcome.message);
-        showToast('Super Admin account created', 'success');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to create Super Admin account.');
-    } finally {
-      setSubmitting(false);
-    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -568,7 +508,7 @@ export function RegisterPage() {
     }
   };
 
-  const isStep1Complete = Boolean(verifiedStudent || superAdminSetupUnlocked);
+  const isStep1Complete = Boolean(verifiedStudent);
 
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6">
@@ -588,15 +528,9 @@ export function RegisterPage() {
                 <UserPlus className="w-4 h-4" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-slate-900">
-                  {superAdminSetupUnlocked
-                    ? 'Initial Super Administrator Registration'
-                    : 'Patient Account Registration'}
-                </h1>
+                <h1 className="text-xl font-bold text-slate-900">Patient Account Registration</h1>
                 <p className="text-xs text-slate-500">
-                  {superAdminSetupUnlocked
-                    ? 'Federal University Dutsin-Ma · Designated Privileged Account Setup'
-                    : 'Federal University Dutsin-Ma · Group 11 Verified Student Enrollment'}
+                  Federal University Dutsin-Ma · Group 11 Verified Student Enrollment
                 </p>
               </div>
             </div>
@@ -639,9 +573,7 @@ export function RegisterPage() {
                 2
               </span>
               <div>
-                <p className="font-semibold">
-                  {superAdminSetupUnlocked ? 'Step 2: Create Super Admin' : 'Step 2: Create Account'}
-                </p>
+                <p className="font-semibold">Step 2: Create Account</p>
                 <p className="text-[11px] opacity-80">Unlocked after verification</p>
               </div>
             </div>
@@ -650,19 +582,9 @@ export function RegisterPage() {
           <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-3.5 py-2.5 flex items-start gap-2.5 text-xs text-sky-900">
             <ShieldCheck className="w-4 h-4 text-[#0369A1] shrink-0 mt-0.5" />
             <span>
-              {superAdminSetupUnlocked ? (
-                <>
-                  <strong>ENG/2011/0001</strong> is recognised as the one-time designated{' '}
-                  <strong>Super Administrator</strong> identity. Once provisioned, this setup form locks permanently and
-                  duplicate Super Admin creation is blocked.
-                </>
-              ) : (
-                <>
-                  Student registration is strictly limited to approved <strong>Group 11</strong> matriculation numbers
-                  and assigns a <strong>Patient</strong> role only. Clinical staff accounts are provisioned by the System
-                  Administrator.
-                </>
-              )}
+              Student registration is strictly limited to approved <strong>Group 11</strong> matriculation numbers
+              and assigns a <strong>Patient</strong> role only. Clinical staff accounts are provisioned by the System
+              Administrator.
             </span>
           </div>
 
@@ -687,18 +609,22 @@ export function RegisterPage() {
                 <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <p className="font-semibold text-white">
-                    Designated Super Administrator Already Provisioned
+                    {superAdminSetupAvailable
+                      ? 'Designated Super Administrator Setup'
+                      : 'Designated Super Administrator Already Provisioned'}
                   </p>
                   <p className="text-slate-200 leading-relaxed">{superAdminNotice}</p>
                 </div>
               </div>
               <div className="flex justify-end">
                 <Link
-                  to="/admin-login"
+                  to={superAdminSetupAvailable ? '/setup-super-admin' : '/admin-login'}
                   className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-slate-100 transition-colors"
                 >
                   <Lock className="w-3.5 h-3.5" />
-                  <span>Go to Admin Sign In</span>
+                  <span>
+                    {superAdminSetupAvailable ? 'Open Super Admin Setup' : 'Go to Admin Sign In'}
+                  </span>
                 </Link>
               </div>
             </div>
@@ -711,154 +637,7 @@ export function RegisterPage() {
             </div>
           )}
 
-          {superAdminSetupUnlocked ? (
-            <form onSubmit={handleSuperAdminSubmit} className="mt-6 space-y-5">
-              {/* Locked Super Admin Identity Panel */}
-              <div className="rounded-xl border border-slate-300 bg-slate-900 p-4 space-y-3 text-slate-100">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-xs font-bold text-white">
-                    <ShieldCheck className="w-4 h-4 text-sky-400" />
-                    <span>Designated Initial Super Administrator Identity (Locked)</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleResetVerification}
-                    className="text-xs font-semibold text-sky-300 hover:underline"
-                  >
-                    Use different matric number
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="flex items-center gap-1 text-[11px] font-semibold text-slate-300 mb-1">
-                      <Lock className="w-3 h-3 text-slate-400" />
-                      <span>Login Username / Matriculation Number</span>
-                    </label>
-                    <input
-                      type="text"
-                      readOnly
-                      value="ENG/2011/0001"
-                      className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-mono font-semibold text-white cursor-not-allowed focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="flex items-center gap-1 text-[11px] font-semibold text-slate-300 mb-1">
-                      <Lock className="w-3 h-3 text-slate-400" />
-                      <span>Assigned Role</span>
-                    </label>
-                    <input
-                      type="text"
-                      readOnly
-                      value="super_admin (Immutable)"
-                      className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-mono font-semibold text-sky-300 cursor-not-allowed focus:outline-none"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="sa-full-name" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Full Name *
-                  </label>
-                  <input
-                    id="sa-full-name"
-                    type="text"
-                    required
-                    value={superAdminForm.full_name}
-                    onChange={(e) => handleSuperAdminChange('full_name', e.target.value)}
-                    placeholder="Ahmad Ibrahim"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="sa-email" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Designated Email Address *
-                  </label>
-                  <input
-                    id="sa-email"
-                    type="email"
-                    required
-                    value={superAdminForm.email}
-                    onChange={(e) => handleSuperAdminChange('email', e.target.value)}
-                    placeholder="i.ahmad22044@fudutsinma.edu.ng"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="sa-password" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Private Password *
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="sa-password"
-                      type={showSuperAdminPass ? 'text' : 'password'}
-                      required
-                      minLength={8}
-                      value={superAdminForm.password}
-                      onChange={(e) => handleSuperAdminChange('password', e.target.value)}
-                      placeholder="Minimum 8 characters"
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 pr-10 text-sm focus:border-[#0369A1] focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowSuperAdminPass((v) => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700"
-                      aria-label={showSuperAdminPass ? 'Hide password' : 'Show password'}
-                    >
-                      {showSuperAdminPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <label htmlFor="sa-confirm-password" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Confirm Password *
-                  </label>
-                  <input
-                    id="sa-confirm-password"
-                    type={showSuperAdminPass ? 'text' : 'password'}
-                    required
-                    minLength={8}
-                    value={superAdminForm.confirm_password}
-                    onChange={(e) => handleSuperAdminChange('confirm_password', e.target.value)}
-                    placeholder="Re-enter password"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
-                  />
-                </div>
-                <div className="sm:col-span-2">
-                  <label htmlFor="sa-provision-secret" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Provisioning Authorization Secret *
-                  </label>
-                  <input
-                    id="sa-provision-secret"
-                    type="password"
-                    required
-                    value={superAdminForm.provision_secret}
-                    onChange={(e) => handleSuperAdminChange('provision_secret', e.target.value)}
-                    placeholder="Enter server SUPER_ADMIN_PROVISION_SECRET"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono focus:border-[#0369A1] focus:outline-none"
-                  />
-                  <p className="mt-1 text-[11px] text-slate-500">
-                    Validated server-side against <code>SUPER_ADMIN_PROVISION_SECRET</code> before Super Admin creation.
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60 transition-colors"
-              >
-                <ShieldCheck className="w-4 h-4 text-sky-400" />
-                <span>
-                  {submitting
-                    ? 'Provisioning Super Administrator...'
-                    : 'Create Initial Super Admin Account'}
-                </span>
-              </button>
-            </form>
-          ) : !verifiedStudent ? (
+          {!verifiedStudent ? (
             <form onSubmit={handleVerifyMatric} className="mt-6 space-y-4">
               <div>
                 <label htmlFor="verify-matric-input" className="block text-xs font-semibold text-slate-700 mb-1.5">
