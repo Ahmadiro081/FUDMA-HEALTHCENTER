@@ -31,7 +31,7 @@ const DEMO_ACCOUNTS = SHOW_DEV_DEMO_ACCOUNTS
   : [];
 
 export function LoginPage() {
-  const { login } = useAuth();
+  const { login, authMode } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
 
@@ -82,6 +82,13 @@ export function LoginPage() {
               <p className="text-xs text-slate-500">FUDMA HEALTHCENTER · Hospital Management</p>
             </div>
           </div>
+
+          {authMode === 'unconfigured' && (
+            <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
+              Production Supabase authentication is not configured. Add <code>VITE_SUPABASE_URL</code> and{' '}
+              <code>VITE_SUPABASE_ANON_KEY</code> to enable sign in.
+            </div>
+          )}
 
           {error && (
             <div className="mt-5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
@@ -195,7 +202,7 @@ export function LoginPage() {
 }
 
 export function RegisterPage() {
-  const { register } = useAuth();
+  const { register, authMode } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
 
@@ -219,6 +226,7 @@ export function RegisterPage() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [verificationNotice, setVerificationNotice] = useState('');
 
   const handleChange = (field: string, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -241,6 +249,7 @@ export function RegisterPage() {
     }
 
     setSubmitting(true);
+    setVerificationNotice('');
     try {
       const created = await register({
         full_name: form.full_name,
@@ -262,7 +271,13 @@ export function RegisterPage() {
       showToast('Patient account created successfully', 'success');
       navigate(getRoleDashboardPath(created.role), { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Registration failed.');
+      const msg = err instanceof Error ? err.message : 'Registration failed.';
+      if (msg.toLowerCase().includes('verify your') || msg.toLowerCase().includes('check your email')) {
+        setVerificationNotice(msg);
+        showToast('Verification email sent', 'info');
+      } else {
+        setError(msg);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -301,6 +316,21 @@ export function RegisterPage() {
               accounts (Nursing, Laboratory, Pharmacy, Doctors) are provisioned exclusively by the System Administrator.
             </span>
           </div>
+
+          {authMode === 'unconfigured' && (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
+              Production Supabase configuration is required before registering accounts.
+            </div>
+          )}
+
+          {verificationNotice && (
+            <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs font-medium text-emerald-900">
+              {verificationNotice}{' '}
+              <Link to="/login" className="underline font-semibold ml-1">
+                Go to Sign In
+              </Link>
+            </div>
+          )}
 
           {error && (
             <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
@@ -513,11 +543,13 @@ export function RegisterPage() {
 }
 
 export function ResetPasswordPage() {
-  const { resetPassword, authMode } = useAuth();
+  const { resetPassword, updateRecoveryPassword, authMode, recoveryMode } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
 
   const [email, setEmail] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -540,6 +572,29 @@ export function ResetPasswordPage() {
     }
   };
 
+  const handleSetNewPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (newPassword.length < 6) {
+      setError('New password must be at least 6 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const msg = await updateRecoveryPassword(newPassword);
+      showToast(msg, 'success');
+      navigate('/login', { replace: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update password.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center py-10 px-4 sm:px-6">
       <div className="max-w-md w-full mx-auto">
@@ -554,18 +609,22 @@ export function ResetPasswordPage() {
         <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8">
           <h1 className="text-xl font-bold text-slate-900">Account Password Recovery</h1>
 
-          {authMode === 'local' ? (
+          {authMode !== 'supabase' ? (
             <div className="mt-4 space-y-4">
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 space-y-2">
-                <p className="font-semibold">Self-Service Password Reset Disabled</p>
-                <p>
-                  Direct password resets are disabled in standalone mode to protect patient and
-                  clinical accounts from unauthorized changes.
+                <p className="font-semibold">
+                  {authMode === 'unconfigured'
+                    ? 'Supabase Configuration Required'
+                    : 'Self-Service Password Reset Disabled'}
                 </p>
                 <p>
-                  To recover your account, please contact the FUDMA Healthcenter System
-                  Administrator or ICT Clinic Desk with your valid university/hospital ID, or
-                  enable verified email recovery via Supabase Auth.
+                  {authMode === 'unconfigured'
+                    ? 'Configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable verified email password recovery.'
+                    : 'Direct password resets are disabled in standalone mode to protect patient and clinical accounts from unauthorized changes.'}
+                </p>
+                <p>
+                  To recover your account, please contact the FUDMA Healthcenter System Administrator
+                  or ICT Clinic Desk with your valid university/hospital ID.
                 </p>
               </div>
               <Link
@@ -575,6 +634,56 @@ export function ResetPasswordPage() {
                 Return to Sign In
               </Link>
             </div>
+          ) : recoveryMode ? (
+            <>
+              <p className="mt-1 text-xs text-slate-500">
+                Your recovery link has been verified. Set a new password for your account below.
+              </p>
+
+              {error && (
+                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
+                  {error}
+                </div>
+              )}
+
+              <form onSubmit={handleSetNewPassword} className="mt-5 space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    New Password *
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Minimum 6 characters"
+                    className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Confirm New Password *
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Re-enter new password"
+                    className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="w-full rounded-lg bg-[#0F4C81] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#0369A1] disabled:opacity-60 transition-colors"
+                >
+                  {submitting ? 'Updating Password...' : 'Update Password'}
+                </button>
+              </form>
+            </>
           ) : (
             <>
               <p className="mt-1 text-xs text-slate-500">

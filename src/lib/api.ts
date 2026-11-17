@@ -1,3 +1,5 @@
+import { isSupabaseConfigured } from './supabase';
+import { supabaseApi } from './supabaseApi';
 import type {
   ActivityLog,
   AppNotification,
@@ -19,6 +21,9 @@ import type {
 const TOKEN_STORAGE_KEY = 'fudma_hc_token';
 
 export function getStoredToken(): string | null {
+  if (isSupabaseConfigured()) {
+    return null;
+  }
   try {
     return sessionStorage.getItem(TOKEN_STORAGE_KEY);
   } catch {
@@ -28,7 +33,7 @@ export function getStoredToken(): string | null {
 
 export function setStoredToken(token: string | null): void {
   try {
-    if (token) {
+    if (token && !isSupabaseConfigured()) {
       sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
     } else {
       sessionStorage.removeItem(TOKEN_STORAGE_KEY);
@@ -40,7 +45,19 @@ export function setStoredToken(token: string | null): void {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+function assertLocalDevAllowed(): void {
+  if (isSupabaseConfigured()) {
+    throw new Error('Express local API is bypassed while Supabase backend is active.');
+  }
+  if (import.meta.env.PROD) {
+    throw new Error(
+      'Production Supabase configuration missing. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY; local JSON fallback is disabled in production.'
+    );
+  }
+}
+
+async function localRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+  assertLocalDevAllowed();
   const token = getStoredToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -66,150 +83,225 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export const api = {
   auth: {
     register: (payload: Record<string, unknown>) =>
-      request<{ token: string; user: AuthUser }>('/api/auth/register', {
+      localRequest<{ token: string; user: AuthUser }>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
     login: (email: string, password: string) =>
-      request<{ token: string; user: AuthUser }>('/api/auth/login', {
+      localRequest<{ token: string; user: AuthUser }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       }),
-    logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-    me: () => request<{ user: AuthUser }>('/api/auth/me'),
+    logout: () => localRequest<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+    me: () => localRequest<{ user: AuthUser }>('/api/auth/me'),
   },
   reference: {
-    departments: () => request<{ departments: Department[] }>('/api/departments'),
-    doctors: () => request<{ doctors: DoctorRecord[] }>('/api/doctors'),
-    publicSettings: () => request<{ settings: SystemSettings }>('/api/settings/public'),
+    departments: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.reference.departments()
+        : localRequest<{ departments: Department[] }>('/api/departments'),
+    doctors: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.reference.doctors()
+        : localRequest<{ doctors: DoctorRecord[] }>('/api/doctors'),
+    publicSettings: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.reference.publicSettings()
+        : localRequest<{ settings: SystemSettings }>('/api/settings/public'),
   },
   patients: {
     list: (q?: string) =>
-      request<{ patients: PatientRecord[] }>(`/api/patients${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+      isSupabaseConfigured()
+        ? supabaseApi.patients.list(q)
+        : localRequest<{ patients: PatientRecord[] }>(`/api/patients${q ? `?q=${encodeURIComponent(q)}` : ''}`),
     createWalkIn: (payload: Record<string, unknown>) =>
-      request<{ patient: PatientRecord }>('/api/patients/walk-in', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.patients.createWalkIn(payload)
+        : localRequest<{ patient: PatientRecord }>('/api/patients/walk-in', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
     update: (id: string, payload: Record<string, unknown>) =>
-      request<{ patient: PatientRecord }>(`/api/patients/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.patients.update(id, payload)
+        : localRequest<{ patient: PatientRecord }>(`/api/patients/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
   },
   appointments: {
-    list: () => request<{ appointments: Appointment[] }>('/api/appointments'),
+    list: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.appointments.list()
+        : localRequest<{ appointments: Appointment[] }>('/api/appointments'),
     create: (payload: Record<string, unknown>) =>
-      request<{ appointment: Appointment }>('/api/appointments', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.appointments.create(payload)
+        : localRequest<{ appointment: Appointment }>('/api/appointments', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
     update: (id: string, payload: Record<string, unknown>) =>
-      request<{ appointment: Appointment }>(`/api/appointments/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.appointments.update(id, payload)
+        : localRequest<{ appointment: Appointment }>(`/api/appointments/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
   },
   vitals: {
     list: (patientId?: string) =>
-      request<{ vitals: PatientVital[] }>(`/api/vitals${patientId ? `?patient_id=${encodeURIComponent(patientId)}` : ''}`),
+      isSupabaseConfigured()
+        ? supabaseApi.vitals.list(patientId)
+        : localRequest<{ vitals: PatientVital[] }>(
+            `/api/vitals${patientId ? `?patient_id=${encodeURIComponent(patientId)}` : ''}`
+          ),
     create: (payload: Record<string, unknown>) =>
-      request<{ vital: PatientVital; appointment: Appointment }>('/api/vitals', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.vitals.create(payload)
+        : localRequest<{ vital: PatientVital; appointment: Appointment }>('/api/vitals', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
   },
   consultations: {
-    list: () => request<{ consultations: Consultation[] }>('/api/consultations'),
+    list: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.consultations.list()
+        : localRequest<{ consultations: Consultation[] }>('/api/consultations'),
     save: (payload: Record<string, unknown>) =>
-      request<{ consultation: Consultation }>('/api/consultations', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.consultations.save(payload)
+        : localRequest<{ consultation: Consultation }>('/api/consultations', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
   },
   laboratory: {
-    list: () => request<{ requests: LaboratoryRequest[] }>('/api/laboratory/requests'),
+    list: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.laboratory.list()
+        : localRequest<{ requests: LaboratoryRequest[] }>('/api/laboratory/requests'),
     create: (payload: Record<string, unknown>) =>
-      request<{ request: LaboratoryRequest }>('/api/laboratory/requests', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.laboratory.create(payload)
+        : localRequest<{ request: LaboratoryRequest }>('/api/laboratory/requests', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
     update: (id: string, payload: Record<string, unknown>) =>
-      request<{ request: LaboratoryRequest }>(`/api/laboratory/requests/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.laboratory.update(id, payload)
+        : localRequest<{ request: LaboratoryRequest }>(`/api/laboratory/requests/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
   },
   pharmacy: {
-    medications: () => request<{ medications: Medication[] }>('/api/pharmacy/medications'),
+    medications: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.pharmacy.medications()
+        : localRequest<{ medications: Medication[] }>('/api/pharmacy/medications'),
     addMedication: (payload: Record<string, unknown>) =>
-      request<{ medication: Medication }>('/api/pharmacy/medications', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.pharmacy.addMedication(payload)
+        : localRequest<{ medication: Medication }>('/api/pharmacy/medications', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
     updateMedication: (id: string, payload: Record<string, unknown>) =>
-      request<{ medication: Medication }>(`/api/pharmacy/medications/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
-    prescriptions: () => request<{ prescriptions: Prescription[] }>('/api/pharmacy/prescriptions'),
+      isSupabaseConfigured()
+        ? supabaseApi.pharmacy.updateMedication(id, payload)
+        : localRequest<{ medication: Medication }>(`/api/pharmacy/medications/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
+    prescriptions: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.pharmacy.prescriptions()
+        : localRequest<{ prescriptions: Prescription[] }>('/api/pharmacy/prescriptions'),
     createPrescription: (payload: Record<string, unknown>) =>
-      request<{ prescription: Prescription }>('/api/pharmacy/prescriptions', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.pharmacy.createPrescription(payload)
+        : localRequest<{ prescription: Prescription }>('/api/pharmacy/prescriptions', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
     updatePrescription: (id: string, payload: Record<string, unknown>) =>
-      request<{ prescription: Prescription }>(`/api/pharmacy/prescriptions/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.pharmacy.updatePrescription(id, payload)
+        : localRequest<{ prescription: Prescription }>(`/api/pharmacy/prescriptions/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
   },
   notifications: {
-    list: () => request<{ notifications: AppNotification[] }>('/api/notifications'),
-    markRead: (id: string) => request<{ ok: boolean }>(`/api/notifications/${id}/read`, { method: 'PATCH' }),
-    markAllRead: () => request<{ ok: boolean }>('/api/notifications/read-all', { method: 'POST' }),
+    list: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.notifications.list()
+        : localRequest<{ notifications: AppNotification[] }>('/api/notifications'),
+    markRead: (id: string) =>
+      isSupabaseConfigured()
+        ? supabaseApi.notifications.markRead(id)
+        : localRequest<{ ok: boolean }>(`/api/notifications/${id}/read`, { method: 'PATCH' }),
+    markAllRead: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.notifications.markAllRead()
+        : localRequest<{ ok: boolean }>('/api/notifications/read-all', { method: 'POST' }),
   },
   admin: {
     overview: () =>
-      request<{
-        stats: {
-          total_patients: number;
-          total_staff: number;
-          total_appointments: number;
-          todays_appointments: number;
-          pending_labs: number;
-          pending_prescriptions: number;
-          low_stock_medications: number;
-        };
-        staff: StaffAccountSummary[];
-        departments: Department[];
-        activity_logs: ActivityLog[];
-        settings: SystemSettings;
-      }>('/api/admin/overview'),
+      isSupabaseConfigured()
+        ? supabaseApi.admin.overview()
+        : localRequest<{
+            stats: {
+              total_patients: number;
+              total_staff: number;
+              total_appointments: number;
+              todays_appointments: number;
+              pending_labs: number;
+              pending_prescriptions: number;
+              low_stock_medications: number;
+            };
+            staff: StaffAccountSummary[];
+            departments: Department[];
+            activity_logs: ActivityLog[];
+            settings: SystemSettings;
+          }>('/api/admin/overview'),
     createStaff: (payload: Record<string, unknown>) =>
-      request<{ ok: boolean }>('/api/admin/staff', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.admin.createStaff(payload)
+        : localRequest<{ ok: boolean }>('/api/admin/staff', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
     updateStaff: (id: string, payload: { role?: UserRole; is_active?: boolean }) =>
-      request<{ ok: boolean }>(`/api/admin/staff/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.admin.updateStaff(id, payload)
+        : localRequest<{ ok: boolean }>(`/api/admin/staff/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
     createDepartment: (payload: Record<string, unknown>) =>
-      request<{ department: Department }>('/api/admin/departments', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.admin.createDepartment(payload)
+        : localRequest<{ department: Department }>('/api/admin/departments', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
     updateDepartment: (id: string, payload: Record<string, unknown>) =>
-      request<{ department: Department }>(`/api/admin/departments/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.admin.updateDepartment(id, payload)
+        : localRequest<{ department: Department }>(`/api/admin/departments/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
     updateSettings: (payload: Partial<SystemSettings>) =>
-      request<{ settings: SystemSettings }>('/api/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
+      isSupabaseConfigured()
+        ? supabaseApi.admin.updateSettings(payload)
+        : localRequest<{ settings: SystemSettings }>('/api/admin/settings', {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          }),
   },
 };

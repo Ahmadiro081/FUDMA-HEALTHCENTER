@@ -14,6 +14,7 @@ import {
   verifyPassword,
   type StoredUser,
 } from './server/db.ts';
+import { provisionSupabaseStaff } from './api/admin/staff.ts';
 import type {
   AppointmentStatus,
   AuthUser,
@@ -26,6 +27,8 @@ dotenv.config();
 
 const PORT = Number(process.env.PORT || 3000);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const ALLOW_LOCAL_JSON_IN_PROD = process.env.ALLOW_LOCAL_JSON_DEMO === 'true';
+const LOCAL_JSON_ENABLED = !IS_PRODUCTION || ALLOW_LOCAL_JSON_IN_PROD;
 const PLACEHOLDER_SECRETS = new Set([
   'change-this-to-a-long-random-string-in-production',
   'fudma-healthcenter-dev-secret-key-2026',
@@ -35,10 +38,10 @@ const PLACEHOLDER_SECRETS = new Set([
 
 function resolveSessionSecret(): string {
   const configured = process.env.SESSION_SECRET?.trim();
-  if (IS_PRODUCTION) {
+  if (IS_PRODUCTION && LOCAL_JSON_ENABLED) {
     if (!configured || PLACEHOLDER_SECRETS.has(configured) || configured.length < 32) {
       console.error(
-        '[SECURITY FATAL] SESSION_SECRET must be configured with at least 32 random characters in production.'
+        '[SECURITY FATAL] SESSION_SECRET must be configured with at least 32 random characters when local session mode is enabled in production.'
       );
       process.exit(1);
     }
@@ -47,9 +50,11 @@ function resolveSessionSecret(): string {
   if (configured && !PLACEHOLDER_SECRETS.has(configured) && configured.length >= 16) {
     return configured;
   }
-  console.warn(
-    '[SECURITY WARNING] SESSION_SECRET is not set; using an ephemeral random secret for this development process.'
-  );
+  if (!IS_PRODUCTION) {
+    console.warn(
+      '[SECURITY WARNING] SESSION_SECRET is not set; using an ephemeral random secret for this development process.'
+    );
+  }
   return crypto.randomBytes(32).toString('hex');
 }
 
@@ -331,6 +336,28 @@ async function startServer(): Promise<void> {
   });
 
   app.use(express.json({ limit: '1mb' }));
+
+  function isSupabaseBearerToken(req: Request): boolean {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
+    const token = authHeader.slice(7).trim();
+    return token.split('.').length === 3;
+  }
+
+  // Disable all local JSON hospital routes in production unless explicitly opted into demo mode
+  app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    if (req.path === '/admin/staff' && (req.method === 'POST' || req.method === 'OPTIONS')) {
+      next();
+      return;
+    }
+    if (!LOCAL_JSON_ENABLED) {
+      res.status(503).json({
+        error: 'Local JSON storage is disabled in production. Configure Supabase environment variables.',
+      });
+      return;
+    }
+    next();
+  });
 
   const loginLimiter = createRateLimiter({
     windowMs: 15 * 60 * 1000,
@@ -2184,9 +2211,24 @@ async function startServer(): Promise<void> {
     });
   });
 
-  app.post('/api/admin/staff', requireAuth, requireRole('admin'), (req: AuthedRequest, res: Response) => {
-    const db = loadDb();
-    const admin = req.currentUser!;
+  app.post('/api/admin/staff', (req: AuthedRequest, res: Response, next: NextFunction) => {
+    const hasSupabaseJwt = isSupabaseBearerToken(req);
+    const hasLocalHmac = Boolean(
+      getTokenFromRequest(req) && verifyToken(getTokenFromRequest(req) as string)
+    );
+    if (
+      hasSupabaseJwt ||
+      !LOCAL_JSON_ENABLED ||
+      (Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) && !hasLocalHmac)
+    ) {
+      void provisionSupabaseStaff(req, res).catch(next);
+      return;
+    }
+
+    requireAuth(req, res, () => {
+      requireRole('admin')(req, res, () => {
+        const db = loadDb();
+        const admin = req.currentUser!;
     const {
       full_name,
       email,
@@ -2259,6 +2301,8 @@ async function startServer(): Promise<void> {
     });
     saveDb(db);
     res.status(201).json({ ok: true });
+      });
+    });
   });
 
   app.patch('/api/admin/staff/:id', requireAuth, requireRole('admin'), (req: AuthedRequest, res: Response) => {

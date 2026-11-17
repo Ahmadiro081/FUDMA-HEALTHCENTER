@@ -8,11 +8,13 @@ interface AuthContextValue {
   user: AuthUser | null;
   session: Session | null;
   loading: boolean;
-  authMode: 'supabase' | 'local';
+  authMode: 'supabase' | 'local' | 'unconfigured';
+  recoveryMode: boolean;
   login: (email: string, password: string) => Promise<AuthUser>;
   register: (payload: Record<string, unknown>) => Promise<AuthUser>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<string>;
+  updateRecoveryPassword: (newPassword: string) => Promise<string>;
   refreshUser: () => Promise<void>;
 }
 
@@ -94,12 +96,12 @@ async function hydrateSupabaseUser(activeSession: Session): Promise<AuthUser | n
       emergency_contact_name: p.emergency_contact_name,
       emergency_contact_phone: p.emergency_contact_phone,
       is_walk_in: p.is_walk_in,
-      full_name: profile?.full_name || String(meta.full_name || email),
-      email: profile?.email || email,
-      phone: profile?.phone || null,
-      gender: profile?.gender || null,
-      date_of_birth: profile?.date_of_birth || null,
-      address: profile?.address || null,
+      full_name: profile?.full_name || p.full_name || String(meta.full_name || email),
+      email: profile?.email || p.email || email,
+      phone: profile?.phone ?? p.phone ?? null,
+      gender: profile?.gender ?? p.gender ?? null,
+      date_of_birth: profile?.date_of_birth ?? p.date_of_birth ?? null,
+      address: profile?.address ?? p.address ?? null,
       created_at: p.created_at,
       updated_at: p.updated_at,
     };
@@ -141,11 +143,28 @@ async function hydrateSupabaseUser(activeSession: Session): Promise<AuthUser | n
   };
 }
 
+function hasRecoveryUrlHint(): boolean {
+  try {
+    const hash = window.location.hash || '';
+    const search = window.location.search || '';
+    return hash.includes('type=recovery') || search.includes('type=recovery');
+  } catch {
+    return false;
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const useSupabase = isSupabaseConfigured() && Boolean(supabase);
+  const authMode: AuthContextValue['authMode'] = useSupabase
+    ? 'supabase'
+    : import.meta.env.PROD
+      ? 'unconfigured'
+      : 'local';
+
   const [user, setUser] = useState<AuthUser | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [recoveryMode, setRecoveryMode] = useState<boolean>(() => useSupabase && hasRecoveryUrlHint());
 
   const refreshUser = useCallback(async () => {
     if (useSupabase && supabase) {
@@ -159,7 +178,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setSession(data.session);
           setStoredToken(null);
           const hydrated = await hydrateSupabaseUser(data.session);
-          setUser(hydrated);
+          if (hydrated && !hydrated.is_active) {
+            await supabase.auth.signOut();
+            setSession(null);
+            setUser(null);
+          } else {
+            setUser(hydrated);
+          }
         }
       } catch {
         setSession(null);
@@ -167,6 +192,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } finally {
         setLoading(false);
       }
+      return;
+    }
+
+    if (authMode === 'unconfigured') {
+      setStoredToken(null);
+      setSession(null);
+      setUser(null);
+      setLoading(false);
       return;
     }
 
@@ -186,7 +219,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [useSupabase]);
+  }, [useSupabase, authMode]);
 
   useEffect(() => {
     if (!useSupabase || !supabase) {
@@ -195,8 +228,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     let mounted = true;
+    const sb = supabase;
 
-    supabase.auth
+    sb.auth
       .getSession()
       .then(async ({ data, error }) => {
         if (!mounted) return;
@@ -210,10 +244,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setSession(data.session);
         setStoredToken(null);
         const hydrated = await hydrateSupabaseUser(data.session);
-        if (mounted) {
+        if (!mounted) return;
+        if (hydrated && !hydrated.is_active) {
+          await sb.auth.signOut();
+          setSession(null);
+          setUser(null);
+        } else {
           setUser(hydrated);
-          setLoading(false);
         }
+        setLoading(false);
       })
       .catch(() => {
         if (mounted) {
@@ -225,13 +264,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, nextSession) => {
+    } = sb.auth.onAuthStateChange((event, nextSession) => {
       if (!mounted) return;
       setSession(nextSession);
+
+      if (event === 'PASSWORD_RECOVERY') {
+        setRecoveryMode(true);
+      }
 
       if (event === 'SIGNED_OUT' || !nextSession) {
         setStoredToken(null);
         setUser(null);
+        setRecoveryMode(false);
         setLoading(false);
         return;
       }
@@ -242,11 +286,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       void hydrateSupabaseUser(nextSession)
-        .then((hydrated) => {
-          if (mounted) {
+        .then(async (hydrated) => {
+          if (!mounted) return;
+          if (hydrated && !hydrated.is_active) {
+            await sb.auth.signOut();
+            setSession(null);
+            setUser(null);
+          } else {
             setUser(hydrated);
-            setLoading(false);
           }
+          setLoading(false);
         })
         .catch(() => {
           if (mounted) {
@@ -278,8 +327,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           await supabase.auth.signOut();
           throw new Error('This account has been deactivated by an administrator.');
         }
+        setRecoveryMode(false);
         setUser(hydrated);
         return hydrated;
+      }
+
+      if (authMode === 'unconfigured') {
+        throw new Error(
+          'Production Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+        );
       }
 
       const res = await api.auth.login(email, password);
@@ -287,7 +343,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(res.user);
       return res.user;
     },
-    [useSupabase]
+    [useSupabase, authMode]
   );
 
   const register = useCallback(
@@ -299,12 +355,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           email,
           password,
           options: {
+            emailRedirectTo: `${window.location.origin}/login`,
             data: {
               full_name: payload.full_name,
               phone: payload.phone,
               gender: payload.gender,
+              date_of_birth: payload.date_of_birth,
+              address: payload.address,
               matric_or_staff_id: payload.matric_or_staff_id,
               patient_category: payload.patient_category || 'Student',
+              faculty_or_unit: payload.faculty_or_unit,
+              blood_group: payload.blood_group || 'Unknown',
+              genotype: payload.genotype || 'Unknown',
+              allergies: payload.allergies,
+              emergency_contact_name: payload.emergency_contact_name,
+              emergency_contact_phone: payload.emergency_contact_phone,
             },
           },
         });
@@ -313,7 +378,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         if (!data.session) {
           throw new Error(
-            'Registration successful. Please verify your email address before signing in.'
+            'Registration successful. Please check your email inbox to verify your account before signing in.'
           );
         }
         setSession(data.session);
@@ -326,12 +391,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return hydrated;
       }
 
+      if (authMode === 'unconfigured') {
+        throw new Error(
+          'Production Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+        );
+      }
+
       const res = await api.auth.register(payload);
       setStoredToken(res.token);
       setUser(res.user);
       return res.user;
     },
-    [useSupabase]
+    [useSupabase, authMode]
   );
 
   const logout = useCallback(async () => {
@@ -339,18 +410,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await supabase.auth.signOut();
       setSession(null);
       setStoredToken(null);
+      setRecoveryMode(false);
       setUser(null);
       return;
     }
 
-    try {
-      await api.auth.logout();
-    } catch {
-      // Clear local session regardless
+    if (authMode === 'local') {
+      try {
+        await api.auth.logout();
+      } catch {
+        // Clear local session regardless
+      }
     }
     setStoredToken(null);
+    setRecoveryMode(false);
     setUser(null);
-  }, [useSupabase]);
+  }, [useSupabase, authMode]);
 
   const resetPassword = useCallback(
     async (email: string): Promise<string> => {
@@ -360,7 +435,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           throw new Error('Please enter your registered email address.');
         }
         const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
-          redirectTo: `${window.location.origin}/login`,
+          redirectTo: `${window.location.origin}/reset-password`,
         });
         if (error) {
           throw new Error(error.message);
@@ -369,10 +444,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       throw new Error(
-        'Self-service password reset is disabled in standalone mode. Contact your System Administrator or configure Supabase Auth email recovery.'
+        authMode === 'unconfigured'
+          ? 'Supabase Auth must be configured to enable verified email password recovery.'
+          : 'Self-service password reset is disabled in standalone mode. Contact your System Administrator or configure Supabase Auth email recovery.'
       );
     },
-    [useSupabase]
+    [useSupabase, authMode]
+  );
+
+  const updateRecoveryPassword = useCallback(
+    async (newPassword: string): Promise<string> => {
+      if (!useSupabase || !supabase) {
+        throw new Error('Supabase Auth must be configured to update your recovery password.');
+      }
+      if (!newPassword || newPassword.length < 6) {
+        throw new Error('New password must be at least 6 characters.');
+      }
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) {
+        throw new Error(error.message);
+      }
+      setRecoveryMode(false);
+      await refreshUser();
+      return 'Your password has been updated securely.';
+    },
+    [useSupabase, refreshUser]
   );
 
   return (
@@ -381,11 +477,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         user,
         session,
         loading,
-        authMode: useSupabase ? 'supabase' : 'local',
+        authMode,
+        recoveryMode,
         login,
         register,
         logout,
         resetPassword,
+        updateRecoveryPassword,
         refreshUser,
       }}
     >
