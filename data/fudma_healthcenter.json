@@ -891,5 +891,57 @@
     "allow_patient_cancellations": true,
     "appointment_slot_minutes": 30,
     "updated_at": "2026-11-17T06:14:42.517Z"
-  }
+  },
+  "group11_student_whitelist": [
+    {
+      "id": "g11-0001-0000-4000-8000-000000000001",
+      "full_name": "SALISU ABUBAKAR BAKORI",
+      "matric_number": "ENG/2024/32094",
+      "department": "Civil Engineering",
+      "is_registered": false,
+      "registered_user_id": null,
+      "created_at": "2026-11-17T09:30:37.824Z",
+      "registered_at": null
+    },
+    {
+      "id": "g11-0002-0000-4000-8000-000000000002",
+      "full_name": "ABDULHAKEEM FARUK OLANIYI",
+      "matric_number": "ENG/2024/31802",
+      "department": "Mechanical Engineering",
+      "is_registered": false,
+      "registered_user_id": null,
+      "created_at": "2026-11-17T09:30:37.824Z",
+      "registered_at": null
+    },
+    {
+      "id": "g11-0003-0000-4000-8000-000000000003",
+      "full_name": "ALI EZEKIEL ENEOJO",
+      "matric_number": "ENG/2024/31820",
+      "department": "Civil Engineering",
+      "is_registered": false,
+      "registered_user_id": null,
+      "created_at": "2026-11-17T09:30:37.824Z",
+      "registered_at": null
+    },
+    {
+      "id": "g11-0004-0000-4000-8000-000000000004",
+      "full_name": "MUHAMMAD RAJI ABDULMUHAIMIN",
+      "matric_number": "ENG/2024/31747",
+      "department": "Mechatronics Engineering",
+      "is_registered": false,
+      "registered_user_id": null,
+      "created_at": "2026-11-17T09:30:37.824Z",
+      "registered_at": null
+    },
+    {
+      "id": "g11-0005-0000-4000-8000-000000000005",
+      "full_name": "MOHAMMED MANDAJUMA IBRAHIM",
+      "matric_number": "ENG/2024/31911",
+      "department": "Mechanical Engineering",
+      "is_registered": false,
+      "registered_user_id": null,
+      "created_at": "2026-11-17T09:30:37.824Z",
+      "registered_at": null
+    }
+  ]
 }

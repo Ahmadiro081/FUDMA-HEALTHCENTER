@@ -23,6 +23,7 @@ import { DashboardLayout, type SidebarNavItem } from '../components/DashboardLay
 import { LoadingSkeleton } from '../components/ui/EmptyState';
 import { StatCard } from '../components/ui/StatCard';
 import { StatusBadge } from '../components/ui/StatusBadge';
+import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { api } from '../lib/api';
 import type {
@@ -36,9 +37,12 @@ import type {
 } from '../types/hospital';
 
 export function AdminDashboard() {
+  const { user } = useAuth();
   const { showToast } = useToast();
+  const isSuperAdmin = user?.role === 'super_admin';
 
   const [activeTab, setActiveTab] = useState('overview');
+  const [logFilter, setLogFilter] = useState<'all' | 'super_admin'>('all');
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     total_patients: 0,
@@ -116,6 +120,15 @@ export function AdminDashboard() {
     }
     return Object.entries(counts).map(([status, count]) => ({ status, count }));
   }, [appointments]);
+
+  const visibleLogs = useMemo(() => {
+    if (logFilter === 'super_admin') {
+      return activityLogs.filter(
+        (log) => log.actor_role === 'super_admin' || log.action.startsWith('SUPER_ADMIN')
+      );
+    }
+    return activityLogs;
+  }, [activityLogs, logFilter]);
 
   const handleCreateStaff = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -219,8 +232,8 @@ export function AdminDashboard() {
 
   return (
     <DashboardLayout
-      portalTitle="System Administrator"
-      breadcrumb={breadcrumbMap[activeTab] || 'Administrator'}
+      portalTitle={isSuperAdmin ? 'Super Administrator' : 'System Administrator'}
+      breadcrumb={breadcrumbMap[activeTab] || (isSuperAdmin ? 'Super Administrator' : 'Administrator')}
       navItems={navItems}
       activeTab={activeTab}
       onTabChange={setActiveTab}
@@ -239,6 +252,27 @@ export function AdminDashboard() {
         <LoadingSkeleton />
       ) : (
         <div className="space-y-6">
+          {isSuperAdmin && (
+            <div className="rounded-lg border border-slate-300 bg-slate-900 px-4 py-3 text-xs text-slate-100 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>
+                  <strong className="font-semibold text-white">Privileged Super Admin Governance:</strong>{' '}
+                  Full hospital control active. Exclusive authority to provision or govern Administrator accounts; all activity is audited.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setLogFilter('super_admin');
+                  setActiveTab('logs');
+                }}
+                className="font-semibold text-sky-300 hover:underline whitespace-nowrap"
+              >
+                View Super Admin Audit
+              </button>
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard
               label="Registered Patients"
@@ -318,7 +352,9 @@ export function AdminDashboard() {
                 <div>
                   <h2 className="text-base font-bold text-slate-900">Create Staff Account &amp; Assign Role</h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Privileged roles (Nurse, Lab Scientist, Pharmacist, Doctor, Admin) are strictly provisioned here.
+                    {isSuperAdmin
+                      ? 'Privileged roles (Nurse, Lab Scientist, Pharmacist, Doctor, Admin) are strictly provisioned here.'
+                      : 'Clinical roles (Nurse, Lab Scientist, Pharmacist, Doctor) are provisioned here. Administrator provisioning requires Super Admin.'}
                   </p>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -363,7 +399,7 @@ export function AdminDashboard() {
                     <option value="doctor">Consultant / Doctor</option>
                     <option value="lab">Medical Laboratory</option>
                     <option value="pharmacy">Hospital Pharmacy</option>
-                    <option value="admin">System Administrator</option>
+                    {isSuperAdmin && <option value="admin">System Administrator</option>}
                   </select>
                   {staffForm.role === 'doctor' && (
                     <>
@@ -418,44 +454,64 @@ export function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
-                    {staff.map((member) => (
-                      <tr key={member.id} className="hover:bg-slate-50/70">
-                        <td className="py-3 px-4">
-                          <p className="font-semibold text-slate-900">{member.full_name}</p>
-                          {member.specialization && (
-                            <p className="text-xs text-slate-500">
-                              {member.specialization} · {member.consultation_room}
-                            </p>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 font-mono text-xs text-slate-600">{member.email}</td>
-                        <td className="py-3 px-4">
-                          <select
-                            value={member.role}
-                            onChange={(e) => handleChangeStaffRole(member, e.target.value as UserRole)}
-                            className="rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium"
-                          >
-                            <option value="nurse">Nurse</option>
-                            <option value="doctor">Doctor</option>
-                            <option value="lab">Lab Scientist</option>
-                            <option value="pharmacy">Pharmacist</option>
-                            <option value="admin">Admin</option>
-                          </select>
-                        </td>
-                        <td className="py-3 px-4">
-                          <StatusBadge status={member.is_active ? 'Active' : 'Inactive'} />
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => handleToggleStaffActive(member)}
-                            className="rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                          >
-                            {member.is_active ? 'Deactivate' : 'Activate'}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {staff.map((member) => {
+                      const isRowSuperAdmin = member.role === 'super_admin';
+                      const isAdminLocked = member.role === 'admin' && !isSuperAdmin;
+                      return (
+                        <tr key={member.id} className="hover:bg-slate-50/70">
+                          <td className="py-3 px-4">
+                            <p className="font-semibold text-slate-900">{member.full_name}</p>
+                            {member.specialization && (
+                              <p className="text-xs text-slate-500">
+                                {member.specialization} · {member.consultation_room}
+                              </p>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-xs text-slate-600">{member.email}</td>
+                          <td className="py-3 px-4">
+                            {isRowSuperAdmin ? (
+                              <span className="inline-flex items-center gap-1 rounded bg-slate-900 px-2.5 py-1 text-xs font-semibold text-white">
+                                Super Admin · Protected
+                              </span>
+                            ) : isAdminLocked ? (
+                              <span className="inline-flex items-center rounded bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
+                                Admin · Locked
+                              </span>
+                            ) : (
+                              <select
+                                value={member.role}
+                                onChange={(e) => handleChangeStaffRole(member, e.target.value as UserRole)}
+                                className="rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium"
+                              >
+                                <option value="nurse">Nurse</option>
+                                <option value="doctor">Doctor</option>
+                                <option value="lab">Lab Scientist</option>
+                                <option value="pharmacy">Pharmacist</option>
+                                {isSuperAdmin && <option value="admin">Admin</option>}
+                              </select>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
+                            <StatusBadge status={member.is_active ? 'Active' : 'Inactive'} />
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            {isRowSuperAdmin ? (
+                              <span className="text-xs font-medium text-slate-400">Immutable</span>
+                            ) : isAdminLocked ? (
+                              <span className="text-xs font-medium text-slate-400">Super Admin Only</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleStaffActive(member)}
+                                className="rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                              >
+                                {member.is_active ? 'Deactivate' : 'Activate'}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -599,8 +655,30 @@ export function AdminDashboard() {
 
           {activeTab === 'logs' && (
             <div className="rounded-lg border border-slate-200 bg-white overflow-x-auto">
-              <div className="px-5 py-4 border-b border-slate-200">
+              <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-sm font-bold text-slate-900">System Activity &amp; Audit Logs</h2>
+                <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setLogFilter('all')}
+                    className={`rounded-md px-3 py-1 font-semibold transition-colors ${
+                      logFilter === 'all' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    All Audit Logs ({activityLogs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLogFilter('super_admin')}
+                    className={`rounded-md px-3 py-1 font-semibold transition-colors ${
+                      logFilter === 'super_admin'
+                        ? 'bg-slate-900 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Super Admin Audit
+                  </button>
+                </div>
               </div>
               <table className="w-full text-left border-collapse">
                 <thead>
@@ -613,21 +691,40 @@ export function AdminDashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs">
-                  {activityLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-slate-50/70">
-                      <td className="py-3 px-4 font-mono text-slate-500 whitespace-nowrap">
-                        {new Date(log.created_at).toLocaleString()}
+                  {visibleLogs.map((log) => {
+                    const isSuperEvent = log.actor_role === 'super_admin' || log.action.startsWith('SUPER_ADMIN');
+                    return (
+                      <tr key={log.id} className={isSuperEvent ? 'bg-slate-50/90 hover:bg-slate-100/70' : 'hover:bg-slate-50/70'}>
+                        <td className="py-3 px-4 font-mono text-slate-500 whitespace-nowrap">
+                          {new Date(log.created_at).toLocaleString()}
+                        </td>
+                        <td className="py-3 px-4 font-medium text-slate-900">
+                          {log.actor_name}{' '}
+                          <span
+                            className={
+                              log.actor_role === 'super_admin'
+                                ? 'inline-block rounded bg-slate-900 px-1.5 py-0.5 text-[10px] font-semibold text-white'
+                                : 'text-slate-400'
+                            }
+                          >
+                            ({log.actor_role})
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 font-mono font-semibold text-[#0F4C81]">{log.action}</td>
+                        <td className="py-3 px-4 font-mono text-slate-600">
+                          {log.entity_type} {log.entity_id ? `· ${log.entity_id}` : ''}
+                        </td>
+                        <td className="py-3 px-4 text-slate-700">{log.details}</td>
+                      </tr>
+                    );
+                  })}
+                  {visibleLogs.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-8 text-center text-xs text-slate-500">
+                        No audit events recorded for this filter yet.
                       </td>
-                      <td className="py-3 px-4 font-medium text-slate-900">
-                        {log.actor_name} <span className="text-slate-400">({log.actor_role})</span>
-                      </td>
-                      <td className="py-3 px-4 font-mono font-semibold text-[#0F4C81]">{log.action}</td>
-                      <td className="py-3 px-4 font-mono text-slate-600">
-                        {log.entity_type} {log.entity_id ? `· ${log.entity_id}` : ''}
-                      </td>
-                      <td className="py-3 px-4 text-slate-700">{log.details}</td>
                     </tr>
-                  ))}
+                  )}
                 </tbody>
               </table>
             </div>

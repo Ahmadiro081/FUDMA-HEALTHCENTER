@@ -114,7 +114,7 @@ export function LoginPage() {
                 className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-[#0369A1] focus:outline-none"
               />
               <p className="mt-1 text-[11px] text-slate-500">
-                Students: enter your Matriculation Number. Clinical staff &amp; admins: enter your email.
+                Students: enter your Matriculation Number. Staff &amp; Admins: enter your email or privileged username.
               </p>
             </div>
 

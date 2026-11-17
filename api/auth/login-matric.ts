@@ -208,6 +208,7 @@ export async function loginWithMatricOrEmail(
   }
 
   let targetEmail: string | null = null;
+  let privilegedAccount: { user_id: string; login_username: string; full_name: string } | null = null;
   const isEmailLogin = rawIdentifier.includes('@');
 
   if (isEmailLogin) {
@@ -215,43 +216,93 @@ export async function loginWithMatricOrEmail(
   } else {
     const normMatric = normalizeMatric(rawIdentifier);
     if (!/^[A-Z0-9]+\/\d{4}\/\d+$/.test(normMatric)) {
-      sendJson(res, 401, { error: 'Invalid matriculation number or password.' });
+      sendJson(res, 401, { error: 'Invalid login username or password.' });
       return;
     }
 
-    const { data: wlRow, error: wlErr } = await supabaseAdmin
-      .from('group11_student_whitelist')
-      .select('is_registered, registered_user_id')
-      .eq('matric_number', normMatric)
+    // 1. Check Privileged Administrative Accounts first (never on Group 11 whitelist)
+    const { data: privRow, error: privErr } = await supabaseAdmin
+      .from('privileged_accounts')
+      .select('user_id, login_username, role')
+      .eq('login_username', normMatric)
       .maybeSingle();
 
-    if (wlErr) {
-      sendJson(res, 500, { error: 'Unable to verify student credentials at this time.' });
+    if (privErr) {
+      sendJson(res, 500, { error: 'Unable to verify credentials at this time.' });
       return;
     }
 
-    if (!wlRow || !wlRow.is_registered || !wlRow.registered_user_id) {
-      sendJson(res, 401, { error: 'Invalid matriculation number or password.' });
-      return;
+    if (privRow && privRow.role === 'super_admin' && privRow.user_id) {
+      const [profRes, roleRes] = await Promise.all([
+        supabaseAdmin
+          .from('profiles')
+          .select('full_name, email, is_active')
+          .eq('id', privRow.user_id)
+          .maybeSingle(),
+        supabaseAdmin
+          .from('user_roles')
+          .select('role')
+          .eq('user_id', privRow.user_id)
+          .maybeSingle(),
+      ]);
+
+      if (
+        profRes.error ||
+        roleRes.error ||
+        !profRes.data?.email ||
+        roleRes.data?.role !== 'super_admin'
+      ) {
+        sendJson(res, 401, { error: 'Invalid login username or password.' });
+        return;
+      }
+
+      if (profRes.data.is_active === false) {
+        sendJson(res, 403, { error: 'This account has been deactivated by an administrator.' });
+        return;
+      }
+
+      targetEmail = String(profRes.data.email).trim().toLowerCase();
+      privilegedAccount = {
+        user_id: String(privRow.user_id),
+        login_username: String(privRow.login_username),
+        full_name: String(profRes.data.full_name || 'Super Administrator'),
+      };
+    } else {
+      // 2. Fall back to Group 11 approved student whitelist lookup
+      const { data: wlRow, error: wlErr } = await supabaseAdmin
+        .from('group11_student_whitelist')
+        .select('is_registered, registered_user_id')
+        .eq('matric_number', normMatric)
+        .maybeSingle();
+
+      if (wlErr) {
+        sendJson(res, 500, { error: 'Unable to verify student credentials at this time.' });
+        return;
+      }
+
+      if (!wlRow || !wlRow.is_registered || !wlRow.registered_user_id) {
+        sendJson(res, 401, { error: 'Invalid matriculation number or password.' });
+        return;
+      }
+
+      const { data: profRow, error: profErr } = await supabaseAdmin
+        .from('profiles')
+        .select('email, is_active')
+        .eq('id', wlRow.registered_user_id)
+        .maybeSingle();
+
+      if (profErr || !profRow || !profRow.email) {
+        sendJson(res, 401, { error: 'Invalid matriculation number or password.' });
+        return;
+      }
+
+      if (profRow.is_active === false) {
+        sendJson(res, 403, { error: 'This account has been deactivated by an administrator.' });
+        return;
+      }
+
+      targetEmail = String(profRow.email).trim().toLowerCase();
     }
-
-    const { data: profRow, error: profErr } = await supabaseAdmin
-      .from('profiles')
-      .select('email, is_active')
-      .eq('id', wlRow.registered_user_id)
-      .maybeSingle();
-
-    if (profErr || !profRow || !profRow.email) {
-      sendJson(res, 401, { error: 'Invalid matriculation number or password.' });
-      return;
-    }
-
-    if (profRow.is_active === false) {
-      sendJson(res, 403, { error: 'This account has been deactivated by an administrator.' });
-      return;
-    }
-
-    targetEmail = String(profRow.email).trim().toLowerCase();
   }
 
   const { data: authData, error: authError } = await supabaseAuthClient.auth.signInWithPassword({
@@ -271,21 +322,57 @@ export async function loginWithMatricOrEmail(
     sendJson(res, 401, {
       error: isEmailLogin
         ? 'Invalid email or password.'
-        : 'Invalid matriculation number or password.',
+        : privilegedAccount
+          ? 'Invalid login username or password.'
+          : 'Invalid matriculation number or password.',
     });
     return;
   }
 
-  // Verify activation state for email logins as well
-  if (isEmailLogin && authData.user?.id) {
-    const { data: prof } = await supabaseAdmin
-      .from('profiles')
-      .select('is_active')
-      .eq('id', authData.user.id)
-      .maybeSingle();
-    if (prof && prof.is_active === false) {
+  // Verify activation state and record Super Admin login audit event
+  if (privilegedAccount) {
+    await supabaseAdmin
+      .from('activity_logs')
+      .insert({
+        actor_id: privilegedAccount.user_id,
+        actor_name: privilegedAccount.full_name,
+        actor_role: 'super_admin',
+        action: 'SUPER_ADMIN_LOGIN',
+        entity_type: 'privileged_account',
+        entity_id: privilegedAccount.login_username,
+        details: `Super Admin authenticated using ${privilegedAccount.login_username}.`,
+      })
+      .then(() => {}, () => {});
+  } else if (isEmailLogin && authData.user?.id) {
+    const [profRes, roleRes] = await Promise.all([
+      supabaseAdmin
+        .from('profiles')
+        .select('full_name, is_active')
+        .eq('id', authData.user.id)
+        .maybeSingle(),
+      supabaseAdmin
+        .from('user_roles')
+        .select('role')
+        .eq('user_id', authData.user.id)
+        .maybeSingle(),
+    ]);
+    if (profRes.data && profRes.data.is_active === false) {
       sendJson(res, 403, { error: 'This account has been deactivated by an administrator.' });
       return;
+    }
+    if (roleRes.data?.role === 'super_admin') {
+      await supabaseAdmin
+        .from('activity_logs')
+        .insert({
+          actor_id: authData.user.id,
+          actor_name: String(profRes.data?.full_name || 'Super Administrator'),
+          actor_role: 'super_admin',
+          action: 'SUPER_ADMIN_LOGIN',
+          entity_type: 'privileged_account',
+          entity_id: targetEmail,
+          details: 'Super Admin authenticated via email.',
+        })
+        .then(() => {}, () => {});
     }
   }
 

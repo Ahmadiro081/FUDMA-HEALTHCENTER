@@ -34,6 +34,7 @@ export function getRoleDashboardPath(role: UserRole): string {
     case 'pharmacy':
       return '/portal/pharmacy';
     case 'admin':
+    case 'super_admin':
       return '/portal/admin';
     default:
       return '/login';
@@ -54,6 +55,8 @@ export function getRoleLabel(role: UserRole): string {
       return 'Hospital Pharmacy';
     case 'admin':
       return 'System Administrator';
+    case 'super_admin':
+      return 'Super Administrator';
   }
 }
 
@@ -354,7 +357,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             session?: { access_token?: string; refresh_token?: string };
           };
           if (!res.ok || !body.session?.access_token || !body.session?.refresh_token) {
-            throw new Error(body.error || 'Invalid matriculation number or password.');
+            throw new Error(body.error || 'Invalid login username or password.');
           }
           const { data: sessData, error: sessErr } = await supabase.auth.setSession({
             access_token: body.session.access_token,
@@ -375,6 +378,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (!hydrated.is_active) {
           await supabase.auth.signOut();
           throw new Error('This account has been deactivated by an administrator.');
+        }
+        if (hydrated.role === 'super_admin' && trimmedIdentifier.includes('@')) {
+          try {
+            await supabase.from('activity_logs').insert({
+              actor_id: hydrated.id,
+              actor_name: hydrated.full_name,
+              actor_role: 'super_admin',
+              action: 'SUPER_ADMIN_LOGIN',
+              entity_type: 'privileged_account',
+              entity_id: hydrated.email,
+              details: 'Super Admin authenticated via email.',
+            });
+          } catch {
+            // Audit failure must not crash active session setup
+          }
         }
         setRecoveryMode(false);
         setUser(hydrated);

@@ -178,7 +178,8 @@ export async function provisionSupabaseStaff(
     return;
   }
 
-  if (callerRoleRes.data?.role !== 'admin') {
+  const callerRole = String(callerRoleRes.data?.role || '');
+  if (callerRole !== 'admin' && callerRole !== 'super_admin') {
     sendJson(res, 403, { error: 'Only System Administrators can provision staff accounts.' });
     return;
   }
@@ -213,9 +214,21 @@ export async function provisionSupabaseStaff(
     sendJson(res, 400, { error: 'Please choose a stronger temporary password.' });
     return;
   }
+  if (String(body.role || '').trim() === 'super_admin') {
+    sendJson(res, 403, {
+      error: 'Super Admin accounts cannot be created via general staff provisioning.',
+    });
+    return;
+  }
   if (!ALLOWED_STAFF_ROLES.has(role)) {
     sendJson(res, 400, {
       error: 'Invalid staff role selected. Allowed roles: nurse, lab, pharmacy, doctor, admin.',
+    });
+    return;
+  }
+  if (role === 'admin' && callerRole !== 'super_admin') {
+    sendJson(res, 403, {
+      error: 'Only the Super Administrator may provision System Administrator accounts.',
     });
     return;
   }
@@ -337,7 +350,7 @@ export async function provisionSupabaseStaff(
     await supabaseAdmin.from('activity_logs').insert({
       actor_id: callerUser.id,
       actor_name: callerProfileRes.data.full_name,
-      actor_role: 'admin',
+      actor_role: callerRole,
       action: 'STAFF_CREATED',
       entity_type: 'profile',
       entity_id: normalizedEmail,

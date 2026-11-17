@@ -1,4 +1,4 @@
-export type UserRole = 'patient' | 'nurse' | 'lab' | 'pharmacy' | 'doctor' | 'admin';
+export type UserRole = 'patient' | 'nurse' | 'lab' | 'pharmacy' | 'doctor' | 'admin' | 'super_admin';
 
 export type AppointmentStatus =
   | 'Booked'
@@ -305,6 +305,7 @@ export interface StaffAccountSummary {
   phone: string | null;
   role: UserRole;
   is_active: boolean;
+  login_username?: string | null;
   department_id?: string | null;
   department_name?: string | null;
   specialization?: string | null;

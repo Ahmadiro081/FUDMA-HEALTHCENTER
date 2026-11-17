@@ -16,6 +16,15 @@ import {
   type StoredUser,
 } from './server/db.ts';
 import { provisionSupabaseStaff } from './api/admin/staff.ts';
+import {
+  SUPER_ADMIN_ACCOUNT_TYPE,
+  SUPER_ADMIN_ROLE,
+  SUPER_ADMIN_USERNAME,
+  extractProvisionSecret,
+  provisionSuperAdminHandler,
+  validateSuperAdminPassword,
+  verifyProvisionSecret,
+} from './api/admin/provision-super-admin.ts';
 import { loginWithMatricOrEmail } from './api/auth/login-matric.ts';
 import type {
   AppointmentStatus,
@@ -350,6 +359,7 @@ async function startServer(): Promise<void> {
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     if (
       (req.path === '/admin/staff' && (req.method === 'POST' || req.method === 'OPTIONS')) ||
+      req.path === '/admin/provision-super-admin' ||
       req.path === '/auth/login-matric'
     ) {
       next();
@@ -620,22 +630,39 @@ async function startServer(): Promise<void> {
     const db = loadDb();
     const isEmail = rawIdentifier.includes('@');
     let user: StoredUser | undefined;
+    let matchedPrivilegedUsername: string | null = null;
 
     if (isEmail) {
       user = db.users.find((u) => u.email.toLowerCase() === rawIdentifier.toLowerCase());
+      if (user?.role === 'super_admin') {
+        const priv = db.privileged_accounts.find((p) => p.user_id === user?.id);
+        matchedPrivilegedUsername = priv?.login_username || user.email;
+      }
     } else {
       const normMatric = normalizeMatricNumber(rawIdentifier);
-      const wl = db.group11_student_whitelist.find(
-        (entry) => normalizeMatricNumber(entry.matric_number) === normMatric
+      const priv = db.privileged_accounts.find(
+        (entry) => normalizeMatricNumber(entry.login_username) === normMatric
       );
-      if (wl && wl.is_registered && wl.registered_user_id) {
-        user = db.users.find((u) => u.id === wl.registered_user_id);
+      if (priv) {
+        user = db.users.find((u) => u.id === priv.user_id && u.role === 'super_admin');
+        matchedPrivilegedUsername = priv.login_username;
+      } else {
+        const wl = db.group11_student_whitelist.find(
+          (entry) => normalizeMatricNumber(entry.matric_number) === normMatric
+        );
+        if (wl && wl.is_registered && wl.registered_user_id) {
+          user = db.users.find((u) => u.id === wl.registered_user_id);
+        }
       }
     }
 
     if (!user || !verifyPassword(password, user.password_hash)) {
       res.status(401).json({
-        error: isEmail ? 'Invalid email or password.' : 'Invalid matriculation number or password.',
+        error: isEmail
+          ? 'Invalid email or password.'
+          : matchedPrivilegedUsername
+            ? 'Invalid login username or password.'
+            : 'Invalid matriculation number or password.',
       });
       return;
     }
@@ -646,6 +673,19 @@ async function startServer(): Promise<void> {
     if (isDisallowedDemoUserInProd(user)) {
       res.status(403).json({ error: 'Demonstration accounts are disabled in production.' });
       return;
+    }
+
+    if (user.role === 'super_admin') {
+      addActivityLog(db, {
+        actor_id: user.id,
+        actor_name: user.full_name,
+        actor_role: 'super_admin',
+        action: 'SUPER_ADMIN_LOGIN',
+        entity_type: 'privileged_account',
+        entity_id: matchedPrivilegedUsername || user.email,
+        details: `Super Admin authenticated via ${isEmail ? 'email' : matchedPrivilegedUsername || SUPER_ADMIN_USERNAME}.`,
+      });
+      saveDb(db);
     }
 
     const token = signToken(user);
@@ -692,7 +732,7 @@ async function startServer(): Promise<void> {
   // PATIENTS (PROFILE, SEARCH, WALK-IN REGISTRATION)
   // =========================================================================
 
-  app.get('/api/patients', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.get('/api/patients', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     if (user.role === 'patient') {
@@ -714,7 +754,7 @@ async function startServer(): Promise<void> {
     res.json({ patients: list });
   });
 
-  app.post('/api/patients/walk-in', requireAuth, requireRole('nurse', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/patients/walk-in', requireAuth, requireRole('nurse', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const {
       full_name,
       phone,
@@ -789,7 +829,7 @@ async function startServer(): Promise<void> {
       res.status(403).json({ error: 'Patients can only update their own personal record.' });
       return;
     }
-    if (!['patient', 'nurse', 'admin'].includes(user.role)) {
+    if (!['patient', 'nurse', 'admin', 'super_admin'].includes(user.role)) {
       res.status(403).json({ error: 'Insufficient permissions to edit patient demographics.' });
       return;
     }
@@ -899,7 +939,7 @@ async function startServer(): Promise<void> {
   // APPOINTMENTS & NURSING CHECK-IN / QUEUE ALLOCATION
   // =========================================================================
 
-  app.get('/api/appointments', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.get('/api/appointments', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     let list = db.appointments;
@@ -936,7 +976,7 @@ async function startServer(): Promise<void> {
     res.json({ appointments: enriched });
   });
 
-  app.post('/api/appointments', requireAuth, requireRole('patient', 'nurse', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/appointments', requireAuth, requireRole('patient', 'nurse', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const {
@@ -1029,7 +1069,7 @@ async function startServer(): Promise<void> {
 
     const now = new Date().toISOString();
     const code = nextCode('APT', db.appointments.map((a) => a.appointment_code));
-    const isWalkInCheckIn = Boolean(auto_check_in && (user.role === 'nurse' || user.role === 'admin'));
+    const isWalkInCheckIn = Boolean(auto_check_in && ['nurse', 'admin', 'super_admin'].includes(user.role));
     const dayQueueMax = db.appointments
       .filter((a) => a.appointment_date === dateStr && a.queue_number)
       .reduce((acc, item) => Math.max(acc, item.queue_number || 0), 0);
@@ -1117,7 +1157,7 @@ async function startServer(): Promise<void> {
         res.status(400).json({ error: 'Checked-in or completed appointments cannot be cancelled.' });
         return;
       }
-    } else if (!['nurse', 'doctor', 'admin'].includes(user.role)) {
+    } else if (!['nurse', 'doctor', 'admin', 'super_admin'].includes(user.role)) {
       res.status(403).json({ error: 'You do not have permission to update appointments.' });
       return;
     }
@@ -1144,7 +1184,7 @@ async function startServer(): Promise<void> {
     }
 
     if (doctor_id !== undefined && doctor_id !== null && doctor_id !== '') {
-      if (!['nurse', 'admin'].includes(user.role)) {
+      if (!['nurse', 'admin', 'super_admin'].includes(user.role)) {
         res.status(403).json({ error: 'Only nursing staff or administrators can assign consultant doctors.' });
         return;
       }
@@ -1238,7 +1278,7 @@ async function startServer(): Promise<void> {
   // PATIENT VITALS (NURSING & DOCTOR)
   // =========================================================================
 
-  app.get('/api/vitals', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.get('/api/vitals', requireAuth, requireRole('patient', 'nurse', 'doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     let list = db.vitals;
@@ -1261,7 +1301,7 @@ async function startServer(): Promise<void> {
     res.json({ vitals: enriched });
   });
 
-  app.post('/api/vitals', requireAuth, requireRole('nurse', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/vitals', requireAuth, requireRole('nurse', 'doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const {
@@ -1401,7 +1441,7 @@ async function startServer(): Promise<void> {
     if (user.role === 'patient') {
       const pat = db.patients.find((p) => p.profile_id === user.id);
       list = pat ? list.filter((c) => c.patient_id === pat.id) : [];
-    } else if (!['doctor', 'nurse', 'admin'].includes(user.role)) {
+    } else if (!['doctor', 'nurse', 'admin', 'super_admin'].includes(user.role)) {
       res.status(403).json({ error: 'Access denied.' });
       return;
     }
@@ -1422,7 +1462,7 @@ async function startServer(): Promise<void> {
     res.json({ consultations: enriched });
   });
 
-  app.post('/api/consultations', requireAuth, requireRole('doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/consultations', requireAuth, requireRole('doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const {
@@ -1546,7 +1586,7 @@ async function startServer(): Promise<void> {
     if (user.role === 'patient') {
       const pat = db.patients.find((p) => p.profile_id === user.id);
       list = pat ? list.filter((r) => r.patient_id === pat.id) : [];
-    } else if (!['lab', 'doctor', 'admin'].includes(user.role)) {
+    } else if (!['lab', 'doctor', 'admin', 'super_admin'].includes(user.role)) {
       res.status(403).json({ error: 'Access denied.' });
       return;
     }
@@ -1569,7 +1609,7 @@ async function startServer(): Promise<void> {
     res.json({ requests: enriched });
   });
 
-  app.post('/api/laboratory/requests', requireAuth, requireRole('doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/laboratory/requests', requireAuth, requireRole('doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const { consultation_id, test_name, test_category, clinical_notes, urgency } = req.body ?? {};
@@ -1638,7 +1678,7 @@ async function startServer(): Promise<void> {
     res.status(201).json({ request: labReq });
   });
 
-  app.patch('/api/laboratory/requests/:id', requireAuth, requireRole('lab', 'doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.patch('/api/laboratory/requests/:id', requireAuth, requireRole('lab', 'doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const labReq = db.laboratory_requests.find((r) => r.id === req.params.id);
@@ -1688,7 +1728,7 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    if ((user.role === 'lab' || user.role === 'admin') && status !== 'Reviewed') {
+    if (['lab', 'admin', 'super_admin'].includes(user.role) && status !== 'Reviewed') {
       if (labReq.status === 'Reviewed') {
         res.status(400).json({ error: 'Reviewed laboratory reports are locked and cannot be modified.' });
         return;
@@ -1751,7 +1791,7 @@ async function startServer(): Promise<void> {
       }
     }
 
-    if ((user.role === 'doctor' || user.role === 'admin') && status === 'Reviewed') {
+    if (['doctor', 'admin', 'super_admin'].includes(user.role) && status === 'Reviewed') {
       const result = db.laboratory_results.find((r) => r.lab_request_id === labReq.id);
       if (!result || labReq.status !== 'Completed') {
         res.status(400).json({ error: 'Only completed laboratory reports with recorded findings can be reviewed.' });
@@ -1790,12 +1830,12 @@ async function startServer(): Promise<void> {
   // PHARMACY: MEDICATIONS, PRESCRIPTIONS & DISPENSING
   // =========================================================================
 
-  app.get('/api/pharmacy/medications', requireAuth, requireRole('pharmacy', 'doctor', 'nurse', 'admin'), (_req: AuthedRequest, res: Response) => {
+  app.get('/api/pharmacy/medications', requireAuth, requireRole('pharmacy', 'doctor', 'nurse', 'admin', 'super_admin'), (_req: AuthedRequest, res: Response) => {
     const db = loadDb();
     res.json({ medications: db.medications });
   });
 
-  app.post('/api/pharmacy/medications', requireAuth, requireRole('pharmacy', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/pharmacy/medications', requireAuth, requireRole('pharmacy', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const { name, generic_name, category, dosage_form, strength, stock_quantity, reorder_level, unit_label, expiry_date } = req.body ?? {};
@@ -1834,7 +1874,7 @@ async function startServer(): Promise<void> {
     res.status(201).json({ medication: med });
   });
 
-  app.patch('/api/pharmacy/medications/:id', requireAuth, requireRole('pharmacy', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.patch('/api/pharmacy/medications/:id', requireAuth, requireRole('pharmacy', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const med = db.medications.find((m) => m.id === req.params.id);
@@ -1869,7 +1909,7 @@ async function startServer(): Promise<void> {
     if (user.role === 'patient') {
       const pat = db.patients.find((p) => p.profile_id === user.id);
       list = pat ? list.filter((p) => p.patient_id === pat.id) : [];
-    } else if (!['pharmacy', 'doctor', 'admin'].includes(user.role)) {
+    } else if (!['pharmacy', 'doctor', 'admin', 'super_admin'].includes(user.role)) {
       res.status(403).json({ error: 'Access denied.' });
       return;
     }
@@ -1892,7 +1932,7 @@ async function startServer(): Promise<void> {
     res.json({ prescriptions: enriched });
   });
 
-  app.post('/api/pharmacy/prescriptions', requireAuth, requireRole('doctor', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/pharmacy/prescriptions', requireAuth, requireRole('doctor', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const { consultation_id, items } = req.body ?? {};
@@ -2011,7 +2051,7 @@ async function startServer(): Promise<void> {
     res.status(201).json({ prescription: rx });
   });
 
-  app.patch('/api/pharmacy/prescriptions/:id', requireAuth, requireRole('pharmacy', 'admin'), (req: AuthedRequest, res: Response) => {
+  app.patch('/api/pharmacy/prescriptions/:id', requireAuth, requireRole('pharmacy', 'admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const user = req.currentUser!;
     const rx = db.prescriptions.find((p) => p.id === req.params.id);
@@ -2272,10 +2312,148 @@ async function startServer(): Promise<void> {
   });
 
   // =========================================================================
-  // ADMINISTRATOR ROUTES (STRICTLY ADMIN-ONLY)
+  // ADMINISTRATOR & SUPER ADMIN ROUTES
   // =========================================================================
 
-  app.get('/api/admin/overview', requireAuth, requireRole('admin'), (_req: AuthedRequest, res: Response) => {
+  app.all('/api/admin/provision-super-admin', (req: Request, res: Response, next: NextFunction) => {
+    const hasSupabaseEnv = Boolean(
+      (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim() &&
+        (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+    );
+    if (!LOCAL_JSON_ENABLED || hasSupabaseEnv) {
+      void provisionSuperAdminHandler(req, res).catch(next);
+      return;
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method not allowed. Use POST.' });
+      return;
+    }
+
+    const secretCheck = verifyProvisionSecret(extractProvisionSecret(req));
+    if (!secretCheck.ok) {
+      res.status(secretCheck.status).json({ error: secretCheck.error });
+      return;
+    }
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (
+      body.login_username !== undefined &&
+      normalizeMatricNumber(body.login_username) !== SUPER_ADMIN_USERNAME
+    ) {
+      res.status(400).json({
+        error: `Initial Super Admin login username is fixed to ${SUPER_ADMIN_USERNAME}.`,
+      });
+      return;
+    }
+    if (body.role !== undefined && String(body.role).trim() !== SUPER_ADMIN_ROLE) {
+      res.status(400).json({
+        error: `Initial Super Admin role is fixed to ${SUPER_ADMIN_ROLE}.`,
+      });
+      return;
+    }
+
+    const fullName = String(body.full_name || 'FUDMA Healthcenter Super Admin').trim();
+    const email = String(body.email || '')
+      .trim()
+      .toLowerCase();
+    const password = String(body.password || '');
+    const phone = body.phone ? String(body.phone).trim() : null;
+
+    if (!fullName || !email || !password) {
+      res.status(400).json({ error: 'Full name, institutional email, and private password are required.' });
+      return;
+    }
+    if (!VALID_EMAIL_REGEX.test(email)) {
+      res.status(400).json({ error: 'Please provide a valid institutional email address.' });
+      return;
+    }
+    const passErr = validateSuperAdminPassword(password);
+    if (passErr) {
+      res.status(400).json({ error: passErr });
+      return;
+    }
+
+    const db = loadDb();
+    if (
+      db.group11_student_whitelist.some(
+        (entry) => normalizeMatricNumber(entry.matric_number) === SUPER_ADMIN_USERNAME
+      )
+    ) {
+      res.status(409).json({
+        error: `${SUPER_ADMIN_USERNAME} must never exist in group11_student_whitelist.`,
+      });
+      return;
+    }
+    if (
+      db.privileged_accounts.some(
+        (entry) => normalizeMatricNumber(entry.login_username) === SUPER_ADMIN_USERNAME
+      ) ||
+      db.users.some((u) => u.role === 'super_admin')
+    ) {
+      res.status(409).json({
+        error: `Super Admin (${SUPER_ADMIN_USERNAME}) has already been provisioned and cannot be duplicated or overwritten.`,
+      });
+      return;
+    }
+    if (db.users.some((u) => u.email.toLowerCase() === email)) {
+      res.status(409).json({ error: 'An account with this institutional email already exists.' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const userId = crypto.randomUUID();
+    const superAdminUser: StoredUser = {
+      id: userId,
+      full_name: fullName,
+      email,
+      phone,
+      gender: null,
+      date_of_birth: null,
+      address: 'FUDMA Healthcenter Executive Administration',
+      is_active: true,
+      role: 'super_admin',
+      password_hash: hashPassword(password),
+      created_at: now,
+      updated_at: now,
+    };
+
+    db.users.unshift(superAdminUser);
+    db.privileged_accounts.push({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      login_username: SUPER_ADMIN_USERNAME,
+      role: 'super_admin',
+      account_type: SUPER_ADMIN_ACCOUNT_TYPE,
+      is_immutable: true,
+      created_at: now,
+    });
+    addActivityLog(db, {
+      actor_id: userId,
+      actor_name: fullName,
+      actor_role: 'super_admin',
+      action: 'SUPER_ADMIN_PROVISIONED',
+      entity_type: 'privileged_account',
+      entity_id: SUPER_ADMIN_USERNAME,
+      details: `Initial Privileged Administrative Account (${SUPER_ADMIN_USERNAME}) provisioned via secure server-side workflow.`,
+    });
+    saveDb(db);
+
+    res.status(201).json({
+      ok: true,
+      user_id: userId,
+      login_username: SUPER_ADMIN_USERNAME,
+      role: SUPER_ADMIN_ROLE,
+      account_type: SUPER_ADMIN_ACCOUNT_TYPE,
+    });
+  });
+
+  app.get('/api/admin/overview', requireAuth, requireRole('admin', 'super_admin'), (_req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const today = new Date().toISOString().slice(0, 10);
     const staff = db.users
@@ -2283,6 +2461,7 @@ async function startServer(): Promise<void> {
       .map((u) => {
         const doc = db.doctors.find((d) => d.profile_id === u.id);
         const dept = doc ? db.departments.find((d) => d.id === doc.department_id) : null;
+        const priv = db.privileged_accounts.find((p) => p.user_id === u.id);
         return {
           id: u.id,
           full_name: u.full_name,
@@ -2290,6 +2469,7 @@ async function startServer(): Promise<void> {
           phone: u.phone,
           role: u.role,
           is_active: u.is_active,
+          login_username: priv?.login_username || null,
           department_id: doc?.department_id || null,
           department_name: dept?.name || null,
           specialization: doc?.specialization || null,
@@ -2331,7 +2511,7 @@ async function startServer(): Promise<void> {
     }
 
     requireAuth(req, res, () => {
-      requireRole('admin')(req, res, () => {
+      requireRole('admin', 'super_admin')(req, res, () => {
         const db = loadDb();
         const admin = req.currentUser!;
     const {
@@ -2349,9 +2529,21 @@ async function startServer(): Promise<void> {
       res.status(400).json({ error: 'Full name, email, temporary password, and role are required.' });
       return;
     }
+    if (role === 'super_admin') {
+      res.status(403).json({
+        error: 'Super Admin accounts cannot be created via general staff provisioning.',
+      });
+      return;
+    }
     const validRoles: UserRole[] = ['nurse', 'lab', 'pharmacy', 'doctor', 'admin'];
     if (!validRoles.includes(role)) {
       res.status(400).json({ error: 'Invalid staff role selected.' });
+      return;
+    }
+    if (role === 'admin' && admin.role !== 'super_admin') {
+      res.status(403).json({
+        error: 'Only the Super Administrator may provision System Administrator accounts.',
+      });
       return;
     }
 
@@ -2410,7 +2602,7 @@ async function startServer(): Promise<void> {
     });
   });
 
-  app.patch('/api/admin/staff/:id', requireAuth, requireRole('admin'), (req: AuthedRequest, res: Response) => {
+  app.patch('/api/admin/staff/:id', requireAuth, requireRole('admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const admin = req.currentUser!;
     const target = db.users.find((u) => u.id === req.params.id);
@@ -2418,8 +2610,30 @@ async function startServer(): Promise<void> {
       res.status(404).json({ error: 'Staff account not found.' });
       return;
     }
+
+    const isProtectedSuperAdmin =
+      target.role === 'super_admin' || db.privileged_accounts.some((p) => p.user_id === target.id);
+    if (isProtectedSuperAdmin) {
+      res.status(403).json({
+        error: 'The Super Admin account is protected and cannot be modified, suspended, demoted, or deleted.',
+      });
+      return;
+    }
+
     const { role, is_active } = req.body ?? {};
-    if (target.id === admin.id && (is_active === false || (role && role !== 'admin'))) {
+    if (role === 'super_admin') {
+      res.status(403).json({
+        error: 'Super Admin privileges cannot be assigned through staff management.',
+      });
+      return;
+    }
+    if ((target.role === 'admin' || role === 'admin') && admin.role !== 'super_admin') {
+      res.status(403).json({
+        error: 'Only the Super Administrator may assign, modify, or suspend administrator accounts.',
+      });
+      return;
+    }
+    if (target.id === admin.id && (is_active === false || (role && role !== admin.role))) {
       res.status(400).json({ error: 'Administrators cannot deactivate or demote their own active account.' });
       return;
     }
@@ -2464,7 +2678,7 @@ async function startServer(): Promise<void> {
     res.json({ ok: true });
   });
 
-  app.post('/api/admin/departments', requireAuth, requireRole('admin'), (req: AuthedRequest, res: Response) => {
+  app.post('/api/admin/departments', requireAuth, requireRole('admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const admin = req.currentUser!;
     const { name, code, description, location } = req.body ?? {};
@@ -2502,7 +2716,7 @@ async function startServer(): Promise<void> {
     res.status(201).json({ department: dept });
   });
 
-  app.patch('/api/admin/departments/:id', requireAuth, requireRole('admin'), (req: AuthedRequest, res: Response) => {
+  app.patch('/api/admin/departments/:id', requireAuth, requireRole('admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const dept = db.departments.find((d) => d.id === req.params.id);
     if (!dept) {
@@ -2518,7 +2732,7 @@ async function startServer(): Promise<void> {
     res.json({ department: dept });
   });
 
-  app.patch('/api/admin/settings', requireAuth, requireRole('admin'), (req: AuthedRequest, res: Response) => {
+  app.patch('/api/admin/settings', requireAuth, requireRole('admin', 'super_admin'), (req: AuthedRequest, res: Response) => {
     const db = loadDb();
     const admin = req.currentUser!;
     const { clinic_hours, max_daily_appointments, allow_patient_cancellations, appointment_slot_minutes } = req.body ?? {};

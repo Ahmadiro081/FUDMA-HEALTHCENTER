@@ -33,7 +33,7 @@ export default function App() {
             <Route
               path="/portal/nursing"
               element={
-                <ProtectedRoute allowedRoles={['nurse', 'admin']}>
+                <ProtectedRoute allowedRoles={['nurse', 'admin', 'super_admin']}>
                   <NursingDashboard />
                 </ProtectedRoute>
               }
@@ -41,7 +41,7 @@ export default function App() {
             <Route
               path="/portal/doctor"
               element={
-                <ProtectedRoute allowedRoles={['doctor', 'admin']}>
+                <ProtectedRoute allowedRoles={['doctor', 'admin', 'super_admin']}>
                   <DoctorDashboard />
                 </ProtectedRoute>
               }
@@ -49,7 +49,7 @@ export default function App() {
             <Route
               path="/portal/laboratory"
               element={
-                <ProtectedRoute allowedRoles={['lab', 'admin']}>
+                <ProtectedRoute allowedRoles={['lab', 'admin', 'super_admin']}>
                   <LabDashboard />
                 </ProtectedRoute>
               }
@@ -57,7 +57,7 @@ export default function App() {
             <Route
               path="/portal/pharmacy"
               element={
-                <ProtectedRoute allowedRoles={['pharmacy', 'admin']}>
+                <ProtectedRoute allowedRoles={['pharmacy', 'admin', 'super_admin']}>
                   <PharmacyDashboard />
                 </ProtectedRoute>
               }
@@ -65,7 +65,7 @@ export default function App() {
             <Route
               path="/portal/admin"
               element={
-                <ProtectedRoute allowedRoles={['admin']}>
+                <ProtectedRoute allowedRoles={['admin', 'super_admin']}>
                   <AdminDashboard />
                 </ProtectedRoute>
               }

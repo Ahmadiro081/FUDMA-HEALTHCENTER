@@ -161,9 +161,8 @@ export function LandingPage() {
                   </div>
                 ) : (
                   <img
-                    src="/src/assets/images/fudma_health_campus_1794895509779.jpg"
-                    alt="FUDMA Healthcenter medical pavilion at Federal University Dutsin-Ma"
-                    referrerPolicy="no-referrer"
+                    src="/assets/aistudio/image_c5fab221.png"
+                    alt="FUDMA Healthcenter main clinic building, compound entrance, and emergency ambulance at Federal University Dutsin-Ma"
                     onError={() => markImgError('hero')}
                     className="w-full h-full object-cover"
                   />
@@ -235,9 +234,8 @@ export function LandingPage() {
                   </div>
                 ) : (
                   <img
-                    src="/src/assets/images/clinical_consultation_1794895494253.jpg"
-                    alt="Doctor consulting with student patient at FUDMA Healthcenter"
-                    referrerPolicy="no-referrer"
+                    src="/assets/aistudio/image_a7839986.png"
+                    alt="FUDMA Healthcenter outpatient entrance gate, clinic reception front, and visiting hours signboard"
                     onError={() => markImgError('consult')}
                     className="w-full h-full object-cover"
                   />
@@ -263,9 +261,8 @@ export function LandingPage() {
                   </div>
                 ) : (
                   <img
-                    src="/src/assets/images/diagnostic_laboratory_1794895493380.jpg"
-                    alt="FUDMA Medical Laboratory diagnostic bench"
-                    referrerPolicy="no-referrer"
+                    src="/assets/aistudio/image_29dc3ea7.png"
+                    alt="FUDMA Healthcenter emergency ambulance and outpatient clinic hours signboard"
                     onError={() => markImgError('lab')}
                     className="w-full h-full object-cover"
                   />
@@ -291,9 +288,8 @@ export function LandingPage() {
                   </div>
                 ) : (
                   <img
-                    src="/src/assets/images/hospital_pharmacy_1794895493342.jpg"
-                    alt="FUDMA Hospital Pharmacy and Dispensary"
-                    referrerPolicy="no-referrer"
+                    src="/assets/aistudio/image_27781771.png"
+                    alt="Wide view of the FUDMA Healthcenter entrance gate, patient waiting pavilion, and medical complex"
                     onError={() => markImgError('pharmacy')}
                     className="w-full h-full object-cover"
                   />

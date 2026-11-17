@@ -450,7 +450,7 @@ export const supabaseApi = {
             throw new Error(`Patients cannot modify restricted field (${key}).`);
           }
         }
-      } else if (!['nurse', 'admin'].includes(actor.role)) {
+      } else if (!['nurse', 'admin', 'super_admin'].includes(actor.role)) {
         throw new Error('Insufficient permissions to update patient demographics.');
       }
 
@@ -500,7 +500,7 @@ export const supabaseApi = {
       }
 
       const profileId = strOrNull((updated as RawRow).profile_id);
-      if (profileId && (profileId === actor.id || actor.role === 'admin')) {
+      if (profileId && (profileId === actor.id || actor.role === 'admin' || actor.role === 'super_admin')) {
         const profilePatch: RawRow = {};
         if (patientPatch.full_name !== undefined) profilePatch.full_name = patientPatch.full_name;
         if (patientPatch.phone !== undefined) profilePatch.phone = patientPatch.phone;

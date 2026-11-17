@@ -85,6 +85,16 @@ export interface Group11WhitelistEntry {
   registered_at: string | null;
 }
 
+export interface PrivilegedAccountEntry {
+  id: string;
+  user_id: string;
+  login_username: string;
+  role: 'super_admin';
+  account_type: string;
+  is_immutable: boolean;
+  created_at: string;
+}
+
 export interface DatabaseState {
   users: StoredUser[];
   departments: Department[];
@@ -103,6 +113,7 @@ export interface DatabaseState {
   activity_logs: ActivityLog[];
   system_settings: SystemSettings;
   group11_student_whitelist: Group11WhitelistEntry[];
+  privileged_accounts: PrivilegedAccountEntry[];
 }
 
 export function normalizeMatricNumber(value: unknown): string {
@@ -322,6 +333,7 @@ function createInitialSeed(): DatabaseState {
       activity_logs: [],
       system_settings,
       group11_student_whitelist: createGroup11WhitelistSeed(now),
+      privileged_accounts: [],
     };
   }
 
@@ -1098,6 +1110,7 @@ function createInitialSeed(): DatabaseState {
     activity_logs,
     system_settings,
     group11_student_whitelist: createGroup11WhitelistSeed(now),
+    privileged_accounts: [],
   };
 }
 
@@ -1116,13 +1129,19 @@ export function loadDb(): DatabaseState {
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as DatabaseState;
+    let dirty = false;
     if (!Array.isArray(parsed.group11_student_whitelist)) {
       parsed.group11_student_whitelist = createGroup11WhitelistSeed();
-      cachedState = parsed;
-      saveDb(cachedState);
-      return cachedState;
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.privileged_accounts)) {
+      parsed.privileged_accounts = [];
+      dirty = true;
     }
     cachedState = parsed;
+    if (dirty) {
+      saveDb(cachedState);
+    }
     return cachedState;
   } catch {
     cachedState = createInitialSeed();
