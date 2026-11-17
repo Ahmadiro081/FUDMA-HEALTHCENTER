@@ -289,7 +289,7 @@ export async function executeSupabaseSuperAdminProvision(
     supabaseAdmin
       .from('privileged_accounts')
       .select('id, login_username')
-      .limit(1)
+      .eq('login_username', SUPER_ADMIN_USERNAME)
       .maybeSingle(),
     supabaseAdmin
       .from('user_roles')
@@ -315,7 +315,7 @@ export async function executeSupabaseSuperAdminProvision(
       status: 500,
       payload: {
         error:
-          'Unable to query Super Admin registry. Ensure migrations 006..009 have been applied.',
+          'Unable to query Super Admin registry. Ensure migration 006_super_admin.sql has been applied.',
       },
     };
   }
@@ -375,90 +375,41 @@ export async function executeSupabaseSuperAdminProvision(
     // Proceed cleanly if listUsers is unavailable
   }
 
-  // 2. Create server-authorized single-use provisioning intent (SHA-256 hash)
-  const rawIntentToken = crypto.randomBytes(32).toString('hex');
-  const intentTokenHash = crypto.createHash('sha256').update(rawIntentToken, 'utf8').digest('hex');
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-
-  const { data: intentRow, error: intentErr } = await supabaseAdmin
-    .from('provisioning_intents')
-    .insert({
-      token_hash: intentTokenHash,
-      account_origin: 'super_admin_provision',
-      target_email: email,
-      target_username: SUPER_ADMIN_USERNAME,
-      intended_role: SUPER_ADMIN_ROLE,
-      issued_by: null,
-      expires_at: expiresAt,
-    })
-    .select('id')
-    .single();
-
-  if (intentErr || !intentRow) {
-    const msg = intentErr?.message || 'Unable to register provisioning intent.';
-    return {
-      status: 500,
-      payload: {
-        error: msg.toLowerCase().includes('provisioning_intents')
-          ? 'Provisioning intent table is missing. Run supabase/migrations/009_super_admin_provisioning_intent.sql in your Supabase SQL Editor.'
-          : msg,
-      },
-    };
-  }
-
-  // 3. Create Supabase Auth user with temporary long ban & unconfirmed email until token scrub + DB finalization succeed
+  // 2. Create Supabase Auth user with 'admin_staff' initial origin
   const { data: createdAuth, error: createErr } = await supabaseAdmin.auth.admin.createUser({
     email,
     password: params.password,
-    email_confirm: false,
-    ban_duration: '87600h',
+    email_confirm: true,
     app_metadata: {
-      account_origin: 'super_admin_provision',
+      account_origin: 'admin_staff',
       privileged_username: SUPER_ADMIN_USERNAME,
       account_type: SUPER_ADMIN_ACCOUNT_TYPE,
     },
     user_metadata: {
       full_name: fullName,
       phone,
-      provisioning_intent_token: rawIntentToken,
     },
   });
 
   if (createErr || !createdAuth.user) {
-    await supabaseAdmin.from('provisioning_intents').delete().eq('id', intentRow.id).then(() => {}, () => {});
     const msg = createErr?.message || 'Failed to create Super Admin in Supabase Auth.';
     const lower = msg.toLowerCase();
     const status = lower.includes('already') || lower.includes('exists') ? 409 : 400;
-    if (lower.includes('database error')) {
-      return {
-        status,
-        payload: {
-          error: `${msg}. Ensure supabase/migrations/009_super_admin_provisioning_intent.sql has been executed in your Supabase SQL Editor.`,
-        },
-      };
-    }
     return { status, payload: { error: msg } };
   }
 
   const createdUserId = createdAuth.user.id;
 
   try {
-    // Scrub raw provisioning_intent_token from user_metadata before lifting ban/confirming email
-    const { error: scrubErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
+    const { error: metaErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
       app_metadata: {
         account_origin: 'super_admin_provision',
         privileged_username: SUPER_ADMIN_USERNAME,
         account_type: SUPER_ADMIN_ACCOUNT_TYPE,
       },
-      user_metadata: {
-        full_name: fullName,
-        phone,
-        provisioning_intent_token: null,
-      },
     });
-    if (scrubErr) throw new Error(scrubErr.message);
+    if (metaErr) throw new Error(metaErr.message);
 
-    // Atomically finalize profiles, super_admin user_role, privileged_accounts, and activity_logs
     const { data: rpcResult, error: rpcErr } = await supabaseAdmin.rpc(
       'rpc_finalize_super_admin_provision',
       {
@@ -472,24 +423,8 @@ export async function executeSupabaseSuperAdminProvision(
     );
 
     if (rpcErr) {
-      const lowerRpc = rpcErr.message.toLowerCase();
-      if (
-        lowerRpc.includes('could not find the function') ||
-        lowerRpc.includes('does not exist')
-      ) {
-        throw new Error(
-          'Atomic finalizer rpc_finalize_super_admin_provision is missing. Run supabase/migrations/009_super_admin_provisioning_intent.sql in your Supabase SQL Editor.'
-        );
-      }
       throw new Error(rpcErr.message);
     }
-
-    // Confirm email and lift temporary ban only after all cleanup and DB finalization steps succeed
-    const { error: activateErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
-      email_confirm: true,
-      ban_duration: 'none',
-    });
-    if (activateErr) throw new Error(activateErr.message);
 
     return {
       status: 201,
@@ -504,7 +439,6 @@ export async function executeSupabaseSuperAdminProvision(
     };
   } catch (err) {
     await supabaseAdmin.auth.admin.deleteUser(createdUserId).catch(() => {});
-    await supabaseAdmin.from('provisioning_intents').delete().eq('id', intentRow.id).then(() => {}, () => {});
     const message = err instanceof Error ? err.message : 'Unable to finalize Super Admin records.';
     return {
       status: 500,
