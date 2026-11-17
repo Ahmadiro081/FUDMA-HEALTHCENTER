@@ -284,11 +284,12 @@ export async function executeSupabaseSuperAdminProvision(
     supabaseAdmin
       .from('profiles')
       .select('id')
-      .eq('email', email)
+      .ilike('email', email)
+      .limit(1)
       .maybeSingle(),
   ]);
 
-  if (existingPrivRes.error || existingRoleRes.error || existingProfileRes.error) {
+  if (existingPrivRes.error || existingRoleRes.error || whitelistRes.error || existingProfileRes.error) {
     return {
       status: 500,
       payload: {
@@ -325,13 +326,15 @@ export async function executeSupabaseSuperAdminProvision(
     };
   }
 
-  // 2. Create Supabase Auth user with privileged server-only app_metadata
+  // 2. Create Supabase Auth user with 'admin_staff' initial origin so handle_new_user()
+  //    never trips role-protection triggers inside GoTrue's transaction across migrations 005..008.
+  //    Privileged role ('super_admin'), app_metadata, and privileged_accounts are assigned immediately below via service_role.
   const { data: createdAuth, error: createErr } = await supabaseAdmin.auth.admin.createUser({
     email,
     password: params.password,
     email_confirm: true,
     app_metadata: {
-      account_origin: 'super_admin_provision',
+      account_origin: 'admin_staff',
       privileged_username: SUPER_ADMIN_USERNAME,
       account_type: SUPER_ADMIN_ACCOUNT_TYPE,
     },
@@ -343,13 +346,25 @@ export async function executeSupabaseSuperAdminProvision(
 
   if (createErr || !createdAuth.user) {
     const msg = createErr?.message || 'Failed to create Super Admin in Supabase Auth.';
-    const status = msg.toLowerCase().includes('already') || msg.toLowerCase().includes('exists') ? 409 : 400;
-    return { status, payload: { error: msg } };
+    const lower = msg.toLowerCase();
+    const status = lower.includes('already') || lower.includes('exists') ? 409 : 400;
+    const diagnostic =
+      lower.includes('database error')
+        ? `${msg}. Run supabase/migrations/008_fix_super_admin_provisioning.sql in your Supabase SQL Editor and ensure no conflicting profile or auth record exists for ${email}.`
+        : msg;
+    return { status, payload: { error: diagnostic } };
   }
 
   const createdUserId = createdAuth.user.id;
 
   try {
+    // Ensure no patient row is left behind if an earlier migration trigger inserted one
+    const { error: delPatErr } = await supabaseAdmin
+      .from('patients')
+      .delete()
+      .eq('profile_id', createdUserId);
+    if (delPatErr) throw new Error(delPatErr.message);
+
     const { error: profErr } = await supabaseAdmin.from('profiles').upsert(
       {
         id: createdUserId,
@@ -363,6 +378,15 @@ export async function executeSupabaseSuperAdminProvision(
     );
     if (profErr) throw new Error(profErr.message);
 
+    const { error: metaErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
+      app_metadata: {
+        account_origin: 'super_admin_provision',
+        privileged_username: SUPER_ADMIN_USERNAME,
+        account_type: SUPER_ADMIN_ACCOUNT_TYPE,
+      },
+    });
+    if (metaErr) throw new Error(metaErr.message);
+
     const { error: roleErr } = await supabaseAdmin.from('user_roles').upsert(
       {
         user_id: createdUserId,
@@ -371,14 +395,12 @@ export async function executeSupabaseSuperAdminProvision(
       },
       { onConflict: 'user_id' }
     );
-    if (roleErr) throw new Error(roleErr.message);
-
-    // Ensure no patient row is left behind
-    const { error: delPatErr } = await supabaseAdmin
-      .from('patients')
-      .delete()
-      .eq('profile_id', createdUserId);
-    if (delPatErr) throw new Error(delPatErr.message);
+    if (roleErr) {
+      const hint = roleErr.message.toLowerCase().includes('check constraint')
+        ? ' Run supabase/migrations/006_super_admin.sql and 008_fix_super_admin_provisioning.sql in Supabase SQL Editor.'
+        : '';
+      throw new Error(`${roleErr.message}${hint}`);
+    }
 
     const { error: privErr } = await supabaseAdmin.from('privileged_accounts').insert({
       user_id: createdUserId,
@@ -389,15 +411,18 @@ export async function executeSupabaseSuperAdminProvision(
     });
     if (privErr) throw new Error(privErr.message);
 
-    await supabaseAdmin.from('activity_logs').insert({
-      actor_id: createdUserId,
-      actor_name: fullName,
-      actor_role: SUPER_ADMIN_ROLE,
-      action: 'SUPER_ADMIN_PROVISIONED',
-      entity_type: 'privileged_account',
-      entity_id: SUPER_ADMIN_USERNAME,
-      details: `Initial Privileged Administrative Account (${SUPER_ADMIN_USERNAME}) provisioned via secure server-side workflow.`,
-    });
+    await supabaseAdmin
+      .from('activity_logs')
+      .insert({
+        actor_id: createdUserId,
+        actor_name: fullName,
+        actor_role: SUPER_ADMIN_ROLE,
+        action: 'SUPER_ADMIN_PROVISIONED',
+        entity_type: 'privileged_account',
+        entity_id: SUPER_ADMIN_USERNAME,
+        details: `Initial Privileged Administrative Account (${SUPER_ADMIN_USERNAME}) provisioned via secure server-side workflow.`,
+      })
+      .then(() => {}, () => {});
 
     return {
       status: 201,

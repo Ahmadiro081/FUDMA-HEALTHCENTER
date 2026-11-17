@@ -4,6 +4,7 @@ import {
   Building2,
   Calendar,
   FileText,
+  GraduationCap,
   LayoutDashboard,
   Settings,
   ShieldCheck,
@@ -20,6 +21,7 @@ import {
   YAxis,
 } from 'recharts';
 import { DashboardLayout, type SidebarNavItem } from '../components/DashboardLayout';
+import { AdminStudentProvisioningPanel } from '../components/admin/AdminStudentProvisioningPanel';
 import { LoadingSkeleton } from '../components/ui/EmptyState';
 import { StatCard } from '../components/ui/StatCard';
 import { StatusBadge } from '../components/ui/StatusBadge';
@@ -32,6 +34,7 @@ import type {
   Department,
   PatientRecord,
   StaffAccountSummary,
+  StudentAccountSummary,
   SystemSettings,
   UserRole,
 } from '../types/hospital';
@@ -54,6 +57,7 @@ export function AdminDashboard() {
     low_stock_medications: 0,
   });
   const [staff, setStaff] = useState<StaffAccountSummary[]>([]);
+  const [students, setStudents] = useState<StudentAccountSummary[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [patients, setPatients] = useState<PatientRecord[]>([]);
@@ -93,6 +97,7 @@ export function AdminDashboard() {
       ]);
       setStats(ovRes.stats);
       setStaff(ovRes.staff);
+      setStudents(ovRes.students || []);
       setDepartments(ovRes.departments);
       setActivityLogs(ovRes.activity_logs);
       setSettings(ovRes.settings);
@@ -173,6 +178,31 @@ export function AdminDashboard() {
     }
   };
 
+  const handleCreateStudent = async (payload: Record<string, unknown>) => {
+    const res = await api.admin.createStudent(payload);
+    showToast(
+      `Student account created & synced for ${res.student.full_name}`,
+      'success',
+      `Matric: ${res.student.matric_number || 'N/A'}`
+    );
+    await loadAdminData();
+    return { student: res.student };
+  };
+
+  const handleToggleStudentActive = async (student: StudentAccountSummary) => {
+    if (!student.user_id) return;
+    try {
+      await api.admin.updateStudentStatus(student.user_id, !student.is_active);
+      showToast(
+        `${student.full_name} portal login ${student.is_active ? 'deactivated' : 'activated'}`,
+        'info'
+      );
+      await loadAdminData();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Unable to update student portal status', 'error');
+    }
+  };
+
   const handleCreateDepartment = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreatingDept(true);
@@ -214,6 +244,7 @@ export function AdminDashboard() {
 
   const navItems: SidebarNavItem[] = [
     { id: 'overview', label: 'Hospital Overview', icon: <LayoutDashboard className="w-4 h-4" /> },
+    { id: 'students', label: 'Student Accounts', icon: <GraduationCap className="w-4 h-4" /> },
     { id: 'staff', label: 'Staff & Roles', icon: <ShieldCheck className="w-4 h-4" /> },
     { id: 'departments', label: 'Departments', icon: <Building2 className="w-4 h-4" /> },
     { id: 'operations', label: 'Patients & Appointments', icon: <Users className="w-4 h-4" /> },
@@ -223,6 +254,7 @@ export function AdminDashboard() {
 
   const breadcrumbMap: Record<string, string> = {
     overview: 'Administrator Overview',
+    students: 'Student Portal Provisioning & Sync',
     staff: 'Staff Accounts & Role Management',
     departments: 'Clinical Departments',
     operations: 'Patients & Appointments Monitor',
@@ -238,14 +270,24 @@ export function AdminDashboard() {
       activeTab={activeTab}
       onTabChange={setActiveTab}
       headerAction={
-        <button
-          type="button"
-          onClick={() => setActiveTab('staff')}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-[#0F4C81] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#0369A1] whitespace-nowrap"
-        >
-          <UserPlus className="w-3.5 h-3.5" />
-          <span>Provision Staff</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('students')}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+          >
+            <GraduationCap className="w-3.5 h-3.5 text-[#0F4C81]" />
+            <span>Provision Student</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('staff')}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[#0F4C81] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#0369A1] whitespace-nowrap shrink-0"
+          >
+            <UserPlus className="w-3.5 h-3.5" />
+            <span>Provision Staff</span>
+          </button>
+        </div>
       }
     >
       {loading ? (
@@ -344,6 +386,14 @@ export function AdminDashboard() {
                 </div>
               </div>
             </div>
+          )}
+
+          {activeTab === 'students' && (
+            <AdminStudentProvisioningPanel
+              students={students}
+              onCreateStudent={handleCreateStudent}
+              onToggleStudentActive={handleToggleStudentActive}
+            />
           )}
 
           {activeTab === 'staff' && (

@@ -16,6 +16,7 @@ import {
   type StoredUser,
 } from './server/db.ts';
 import { provisionSupabaseStaff } from './api/admin/staff.ts';
+import { provisionSupabaseStudent } from './api/admin/students.ts';
 import {
   DESIGNATED_SUPER_ADMIN_EMAIL,
   SUPER_ADMIN_ACCOUNT_TYPE,
@@ -360,6 +361,7 @@ async function startServer(): Promise<void> {
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     if (
       (req.path === '/admin/staff' && (req.method === 'POST' || req.method === 'OPTIONS')) ||
+      (req.path === '/admin/students' && (req.method === 'POST' || req.method === 'PATCH' || req.method === 'OPTIONS')) ||
       req.path === '/admin/provision-super-admin' ||
       req.path === '/auth/login-matric'
     ) {
@@ -2543,6 +2545,28 @@ async function startServer(): Promise<void> {
         };
       });
 
+    const students = db.patients
+      .filter((p) => p.patient_category === 'Student')
+      .map((p) => {
+        const linkedUser = p.profile_id ? db.users.find((u) => u.id === p.profile_id) : null;
+        return {
+          user_id: p.profile_id,
+          patient_id: p.id,
+          hospital_number: p.hospital_number,
+          matric_number: p.matric_or_staff_id,
+          full_name: linkedUser?.full_name || p.full_name,
+          email: linkedUser?.email || p.email,
+          department: p.faculty_or_unit,
+          phone: linkedUser?.phone || p.phone,
+          blood_group: p.blood_group,
+          genotype: p.genotype,
+          is_active: linkedUser ? linkedUser.is_active : false,
+          is_walk_in: p.is_walk_in,
+          created_at: p.created_at,
+        };
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+
     res.json({
       stats: {
         total_patients: db.patients.length,
@@ -2554,9 +2578,260 @@ async function startServer(): Promise<void> {
         low_stock_medications: db.medications.filter((m) => m.stock_quantity <= m.reorder_level).length,
       },
       staff,
+      students,
       departments: db.departments,
       activity_logs: db.activity_logs.slice(0, 100),
       settings: db.system_settings,
+    });
+  });
+
+  app.all('/api/admin/students', (req: AuthedRequest, res: Response, next: NextFunction) => {
+    const hasSupabaseJwt = isSupabaseBearerToken(req);
+    const hasLocalHmac = Boolean(
+      getTokenFromRequest(req) && verifyToken(getTokenFromRequest(req) as string)
+    );
+    if (
+      hasSupabaseJwt ||
+      !LOCAL_JSON_ENABLED ||
+      (Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) && !hasLocalHmac)
+    ) {
+      void provisionSupabaseStudent(req, res).catch(next);
+      return;
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    if (req.method !== 'POST' && req.method !== 'PATCH') {
+      res.status(405).json({ error: 'Method not allowed. Use POST or PATCH.' });
+      return;
+    }
+
+    requireAuth(req, res, () => {
+      requireRole('admin', 'super_admin')(req, res, () => {
+        const db = loadDb();
+        const admin = req.currentUser!;
+
+        if (req.method === 'PATCH') {
+          const { user_id, is_active } = req.body ?? {};
+          const targetUserId = String(user_id || '').trim();
+          if (!targetUserId || typeof is_active !== 'boolean') {
+            res.status(400).json({ error: 'user_id and boolean is_active are required.' });
+            return;
+          }
+          const target = db.users.find((u) => u.id === targetUserId && u.role === 'patient');
+          if (!target) {
+            res.status(404).json({ error: 'Student portal user account not found.' });
+            return;
+          }
+          target.is_active = is_active;
+          target.updated_at = new Date().toISOString();
+          addActivityLog(db, {
+            actor_id: admin.id,
+            actor_name: admin.full_name,
+            actor_role: admin.role,
+            action: is_active ? 'STUDENT_ACCOUNT_ACTIVATED' : 'STUDENT_ACCOUNT_DEACTIVATED',
+            entity_type: 'profile',
+            entity_id: target.email,
+            details: `${is_active ? 'Activated' : 'Deactivated'} student portal access for ${target.full_name}.`,
+          });
+          saveDb(db);
+          res.json({ ok: true, user_id: target.id, is_active: target.is_active });
+          return;
+        }
+
+        const {
+          full_name,
+          matric_number,
+          department,
+          faculty_or_unit,
+          email,
+          password,
+          phone,
+          gender,
+          date_of_birth,
+          address,
+          blood_group,
+          genotype,
+          allergies,
+          emergency_contact_name,
+          emergency_contact_phone,
+        } = req.body ?? {};
+
+        const cleanName = String(full_name || '').trim();
+        const normMatric = normalizeMatricNumber(matric_number);
+        const cleanDept = String(department || faculty_or_unit || '').trim();
+        const normalizedEmail = String(email || '').trim().toLowerCase();
+        const passStr = String(password || '');
+
+        if (!cleanName || cleanName.length < 2 || cleanName.length > 120) {
+          res.status(400).json({ error: 'Student full name must be between 2 and 120 characters.' });
+          return;
+        }
+        if (!normMatric || !/^[A-Z0-9]+\/\d{4}\/\d+$/.test(normMatric)) {
+          res.status(400).json({ error: 'Please enter a valid FUDMA matriculation number (e.g., ENG/2024/32094).' });
+          return;
+        }
+        if (
+          normMatric === SUPER_ADMIN_USERNAME ||
+          db.privileged_accounts.some((p) => normalizeMatricNumber(p.login_username) === normMatric)
+        ) {
+          res.status(403).json({
+            error: `${normMatric} belongs to a privileged administrative identity and cannot be assigned to a student.`,
+          });
+          return;
+        }
+        if (!cleanDept) {
+          res.status(400).json({ error: 'Academic department / faculty is required.' });
+          return;
+        }
+        if (!normalizedEmail || !VALID_EMAIL_REGEX.test(normalizedEmail)) {
+          res.status(400).json({ error: 'Please enter a valid student email address.' });
+          return;
+        }
+        if (!passStr || passStr.length < 6 || passStr.length > 128) {
+          res.status(400).json({ error: 'Assigned student password must be between 6 and 128 characters.' });
+          return;
+        }
+        if (['123456', 'password', 'qwerty', '12345678', 'abcdef'].includes(passStr.toLowerCase())) {
+          res.status(400).json({ error: 'Please choose a stronger unique password for this student.' });
+          return;
+        }
+        if (gender && !ALLOWED_GENDERS.has(String(gender))) {
+          res.status(400).json({ error: 'Invalid gender selection.' });
+          return;
+        }
+        if (blood_group && !ALLOWED_BLOOD_GROUPS.has(String(blood_group))) {
+          res.status(400).json({ error: 'Invalid blood group selection.' });
+          return;
+        }
+        if (genotype && !ALLOWED_GENOTYPES.has(String(genotype))) {
+          res.status(400).json({ error: 'Invalid genotype selection.' });
+          return;
+        }
+        if (db.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
+          res.status(409).json({ error: 'An account with this student email address already exists.' });
+          return;
+        }
+        if (
+          db.patients.some((p) => normalizeMatricNumber(p.matric_or_staff_id) === normMatric) ||
+          db.group11_student_whitelist.some(
+            (w) => normalizeMatricNumber(w.matric_number) === normMatric && (w.is_registered || w.registered_user_id)
+          )
+        ) {
+          res.status(409).json({ error: `Matriculation number ${normMatric} is already registered in the portal.` });
+          return;
+        }
+
+        const now = new Date().toISOString();
+        const userId = crypto.randomUUID();
+        const cleanPhone = phone ? String(phone).trim() : null;
+        const cleanDob = date_of_birth && isValidCalendarDate(String(date_of_birth)) ? String(date_of_birth) : null;
+        const cleanAddr = address ? String(address).trim() : null;
+
+        const studentUser: StoredUser = {
+          id: userId,
+          full_name: cleanName,
+          email: normalizedEmail,
+          phone: cleanPhone,
+          gender: gender || null,
+          date_of_birth: cleanDob,
+          address: cleanAddr,
+          is_active: true,
+          role: 'patient',
+          password_hash: hashPassword(passStr),
+          created_at: now,
+          updated_at: now,
+        };
+
+        const hospNum = `FUDMA-HC-26-${String(db.patients.length + 101).padStart(4, '0')}`;
+        const studentPatient = {
+          id: crypto.randomUUID(),
+          profile_id: userId,
+          hospital_number: hospNum,
+          matric_or_staff_id: normMatric,
+          patient_category: 'Student' as const,
+          faculty_or_unit: cleanDept,
+          blood_group: blood_group || 'Unknown',
+          genotype: genotype || 'Unknown',
+          allergies: allergies ? String(allergies).trim() : 'None reported',
+          emergency_contact_name: emergency_contact_name ? String(emergency_contact_name).trim() : null,
+          emergency_contact_phone: emergency_contact_phone ? String(emergency_contact_phone).trim() : null,
+          is_walk_in: false,
+          full_name: cleanName,
+          email: normalizedEmail,
+          phone: cleanPhone,
+          gender: studentUser.gender,
+          date_of_birth: cleanDob,
+          address: cleanAddr,
+          created_at: now,
+          updated_at: now,
+        };
+
+        const existingWl = db.group11_student_whitelist.find(
+          (w) => normalizeMatricNumber(w.matric_number) === normMatric
+        );
+        if (existingWl) {
+          existingWl.full_name = cleanName;
+          existingWl.department = cleanDept;
+          existingWl.is_registered = true;
+          existingWl.registered_user_id = userId;
+          existingWl.registered_at = now;
+        } else {
+          db.group11_student_whitelist.push({
+            id: crypto.randomUUID(),
+            full_name: cleanName,
+            matric_number: normMatric,
+            department: cleanDept,
+            is_registered: true,
+            registered_user_id: userId,
+            created_at: now,
+            registered_at: now,
+          });
+        }
+
+        db.users.unshift(studentUser);
+        db.patients.unshift(studentPatient);
+
+        addNotification(db, {
+          recipient_user_id: userId,
+          title: 'Welcome to FUDMA HEALTHCENTER',
+          message: `Your student portal account (${hospNum}) for ${normMatric} was provisioned by Administration.`,
+          category: 'account',
+        });
+        addActivityLog(db, {
+          actor_id: admin.id,
+          actor_name: admin.full_name,
+          actor_role: admin.role,
+          action: 'ADMIN_STUDENT_CREATED',
+          entity_type: 'patient',
+          entity_id: hospNum,
+          details: `Provisioned & synced student portal account for ${cleanName} (${normMatric}, ${cleanDept}).`,
+        });
+        saveDb(db);
+
+        res.status(201).json({
+          ok: true,
+          student: {
+            user_id: userId,
+            patient_id: studentPatient.id,
+            hospital_number: hospNum,
+            matric_number: normMatric,
+            full_name: cleanName,
+            email: normalizedEmail,
+            department: cleanDept,
+            phone: cleanPhone,
+            blood_group: studentPatient.blood_group,
+            genotype: studentPatient.genotype,
+            is_active: true,
+            is_walk_in: false,
+            created_at: now,
+          },
+        });
+      });
     });
   });
 

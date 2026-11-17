@@ -16,6 +16,7 @@ import type {
   Prescription,
   PrescriptionItem,
   StaffAccountSummary,
+  StudentAccountSummary,
   SystemSettings,
   UserRole,
 } from '../types/hospital';
@@ -886,6 +887,7 @@ export const supabaseApi = {
         low_stock_medications: number;
       };
       staff: StaffAccountSummary[];
+      students: StudentAccountSummary[];
       departments: Department[];
       activity_logs: ActivityLog[];
       settings: SystemSettings;
@@ -895,6 +897,7 @@ export const supabaseApi = {
 
       const [
         patientsCountRes,
+        patientsListRes,
         profilesRes,
         rolesRes,
         doctorsRes,
@@ -908,6 +911,11 @@ export const supabaseApi = {
         privRes,
       ] = await Promise.all([
         client.from('patients').select('id', { count: 'exact', head: true }),
+        client
+          .from('patients')
+          .select('id, profile_id, hospital_number, matric_or_staff_id, patient_category, faculty_or_unit, blood_group, genotype, is_walk_in, full_name, email, phone, created_at')
+          .eq('patient_category', 'Student')
+          .order('created_at', { ascending: false }),
         client.from('profiles').select('id, full_name, email, phone, is_active, created_at'),
         client.from('user_roles').select('user_id, role'),
         client.from('doctors').select('profile_id, department_id, specialization, staff_code, consultation_room'),
@@ -979,6 +987,32 @@ export const supabaseApi = {
         .filter((item): item is StaffAccountSummary => item !== null)
         .sort((a, b) => b.created_at.localeCompare(a.created_at));
 
+      const profileMap = new Map(
+        (profilesRes.data || []).map((p) => [String(p.id), p])
+      );
+
+      const students: StudentAccountSummary[] = (!patientsListRes.error && Array.isArray(patientsListRes.data)
+        ? patientsListRes.data
+        : []
+      ).map((pat) => {
+        const linkedProf = pat.profile_id ? profileMap.get(String(pat.profile_id)) : null;
+        return {
+          user_id: strOrNull(pat.profile_id),
+          patient_id: String(pat.id),
+          hospital_number: String(pat.hospital_number),
+          matric_number: strOrNull(pat.matric_or_staff_id),
+          full_name: String(linkedProf?.full_name || pat.full_name || 'Student'),
+          email: strOrNull(linkedProf?.email ?? pat.email),
+          department: strOrNull(pat.faculty_or_unit),
+          phone: strOrNull(linkedProf?.phone ?? pat.phone),
+          blood_group: strOrNull(pat.blood_group),
+          genotype: strOrNull(pat.genotype),
+          is_active: linkedProf ? Boolean(linkedProf.is_active) : false,
+          is_walk_in: Boolean(pat.is_walk_in),
+          created_at: String(pat.created_at),
+        };
+      });
+
       const appts = apptsRes.data || [];
       const meds = medsRes.data || [];
 
@@ -1004,10 +1038,65 @@ export const supabaseApi = {
           low_stock_medications: meds.filter((m) => Number(m.stock_quantity) <= Number(m.reorder_level)).length,
         },
         staff,
+        students,
         departments,
         activity_logs: (logsRes.data || []) as ActivityLog[],
         settings,
       };
+    },
+
+    async createStudent(payload: Record<string, unknown>): Promise<{ ok: boolean; student: StudentAccountSummary }> {
+      const client = requireSupabase();
+      const {
+        data: { session },
+      } = await client.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error('Active administrator session required to provision student accounts.');
+      }
+
+      const res = await fetch('/api/admin/students', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        ok?: boolean;
+        student?: StudentAccountSummary;
+      };
+      if (!res.ok || !body.student) {
+        throw new Error(body.error || `Student provisioning failed with status ${res.status}`);
+      }
+      return { ok: true, student: body.student };
+    },
+
+    async updateStudentStatus(userId: string, isActive: boolean): Promise<{ ok: boolean }> {
+      const client = requireSupabase();
+      const {
+        data: { session },
+      } = await client.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error('Active administrator session required.');
+      }
+
+      const res = await fetch('/api/admin/students', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ user_id: userId, is_active: isActive }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string; ok?: boolean };
+      if (!res.ok) {
+        throw new Error(body.error || `Failed to update student account status (${res.status}).`);
+      }
+      return { ok: true };
     },
 
     async createStaff(payload: Record<string, unknown>): Promise<{ ok: boolean }> {

@@ -15,6 +15,7 @@ import type {
   PatientVital,
   Prescription,
   StaffAccountSummary,
+  StudentAccountSummary,
   SystemSettings,
   UserRole,
 } from '../types/hospital';
@@ -272,6 +273,7 @@ export const api = {
               low_stock_medications: number;
             };
             staff: StaffAccountSummary[];
+            students: StudentAccountSummary[];
             departments: Department[];
             activity_logs: ActivityLog[];
             settings: SystemSettings;
@@ -282,6 +284,20 @@ export const api = {
         : localRequest<{ ok: boolean }>('/api/admin/staff', {
             method: 'POST',
             body: JSON.stringify(payload),
+          }),
+    createStudent: (payload: Record<string, unknown>) =>
+      isSupabaseConfigured()
+        ? supabaseApi.admin.createStudent(payload)
+        : localRequest<{ ok: boolean; student: StudentAccountSummary }>('/api/admin/students', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          }),
+    updateStudentStatus: (userId: string, isActive: boolean) =>
+      isSupabaseConfigured()
+        ? supabaseApi.admin.updateStudentStatus(userId, isActive)
+        : localRequest<{ ok: boolean }>('/api/admin/students', {
+            method: 'PATCH',
+            body: JSON.stringify({ user_id: userId, is_active: isActive }),
           }),
     updateStaff: (id: string, payload: { role?: UserRole; is_active?: boolean }) =>
       isSupabaseConfigured()

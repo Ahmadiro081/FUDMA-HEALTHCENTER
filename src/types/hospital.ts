@@ -329,3 +329,32 @@ export interface MatricVerificationResult {
   is_provisioned?: boolean;
 }
 
+export interface StudentAccountSummary {
+  user_id: string | null;
+  patient_id: string;
+  hospital_number: string;
+  matric_number: string | null;
+  full_name: string;
+  email: string | null;
+  department: string | null;
+  phone: string | null;
+  blood_group: string | null;
+  genotype: string | null;
+  is_active: boolean;
+  is_walk_in: boolean;
+  created_at: string;
+}
+
+export interface CreateStudentPayload {
+  full_name: string;
+  matric_number: string;
+  department: string;
+  email: string;
+  password: string;
+  phone?: string;
+  gender?: 'Male' | 'Female' | 'Other' | '';
+  blood_group?: string;
+  genotype?: string;
+  allergies?: string;
+}
+
