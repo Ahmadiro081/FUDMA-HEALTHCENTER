@@ -560,9 +560,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!normalizedMatric) {
         throw new Error('Please verify your Group 11 matriculation number before creating an account.');
       }
-      if (normalizedMatric === 'ENG/2012/0001') {
+      if (normalizedMatric === 'ENG/2011/0001') {
         throw new Error(
-          'ENG/2012/0001 is the designated Initial Super Administrator identity and cannot be registered as a public patient account.'
+          'ENG/2011/0001 is the designated Initial Super Administrator identity and cannot be registered as a public patient account.'
         );
       }
 
@@ -658,8 +658,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         },
         credentials: 'include',
         body: JSON.stringify({
-          matric_number: 'ENG/2012/0001',
-          login_username: 'ENG/2012/0001',
+          matric_number: 'ENG/2011/0001',
+          login_username: 'ENG/2011/0001',
           role: 'super_admin',
           full_name: fullName,
           email,
@@ -680,7 +680,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       try {
-        const signedIn = await login('ENG/2012/0001', password);
+        const signedIn = await login('ENG/2011/0001', password);
         return {
           user: signedIn,
           message: 'Initial Super Administrator account created and signed in.',
@@ -689,7 +689,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return {
           user: null,
           message:
-            'Initial Super Administrator account (ENG/2012/0001) has been created. Please sign in via Portal Sign In.',
+            'Initial Super Administrator account (ENG/2011/0001) has been created. Please sign in via /admin-login.',
         };
       }
     },

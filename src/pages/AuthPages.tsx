@@ -363,7 +363,7 @@ export function RegisterPage() {
 
   const [superAdminForm, setSuperAdminForm] = useState({
     full_name: 'Ahmad Ibrahim',
-    email: 'ahmadcybro@gmail.com',
+    email: 'i.ahmad22044@fudutsinma.edu.ng',
     password: '',
     confirm_password: '',
     provision_secret: '',
@@ -418,10 +418,10 @@ export function RegisterPage() {
           setSuperAdminSetupUnlocked(false);
           setSuperAdminNotice(
             result.message ||
-              'ENG/2012/0001 is the designated Initial Super Administrator identity and has already been provisioned. Please sign in through Portal Sign In with your credentials.'
+              'ENG/2011/0001 is the designated Initial Super Administrator identity and has already been provisioned. Please sign in through /admin-login with your credentials.'
           );
         } else {
-          setMatricInput('ENG/2012/0001');
+          setMatricInput('ENG/2011/0001');
           setSuperAdminSetupUnlocked(true);
           showToast('Designated Super Administrator identity verified', 'success');
         }
@@ -469,7 +469,7 @@ export function RegisterPage() {
     e.preventDefault();
     setError('');
     if (!superAdminSetupUnlocked) {
-      setError('Please verify ENG/2012/0001 first.');
+      setError('Please verify ENG/2011/0001 first.');
       return;
     }
     if (!superAdminForm.full_name.trim() || !superAdminForm.email.trim()) {
@@ -652,7 +652,7 @@ export function RegisterPage() {
             <span>
               {superAdminSetupUnlocked ? (
                 <>
-                  <strong>ENG/2012/0001</strong> is recognised as the one-time designated{' '}
+                  <strong>ENG/2011/0001</strong> is recognised as the one-time designated{' '}
                   <strong>Super Administrator</strong> identity. Once provisioned, this setup form locks permanently and
                   duplicate Super Admin creation is blocked.
                 </>
@@ -694,11 +694,11 @@ export function RegisterPage() {
               </div>
               <div className="flex justify-end">
                 <Link
-                  to="/login"
+                  to="/admin-login"
                   className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-slate-100 transition-colors"
                 >
                   <Lock className="w-3.5 h-3.5" />
-                  <span>Go to Portal Sign In</span>
+                  <span>Go to Admin Sign In</span>
                 </Link>
               </div>
             </div>
@@ -738,7 +738,7 @@ export function RegisterPage() {
                     <input
                       type="text"
                       readOnly
-                      value="ENG/2012/0001"
+                      value="ENG/2011/0001"
                       className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-mono font-semibold text-white cursor-not-allowed focus:outline-none"
                     />
                   </div>
@@ -782,7 +782,7 @@ export function RegisterPage() {
                     required
                     value={superAdminForm.email}
                     onChange={(e) => handleSuperAdminChange('email', e.target.value)}
-                    placeholder="ahmadcybro@gmail.com"
+                    placeholder="i.ahmad22044@fudutsinma.edu.ng"
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
                   />
                 </div>

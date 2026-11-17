@@ -16,7 +16,7 @@ export interface ServerlessResponse extends ServerResponse {
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS_PER_IDENTIFIER = 12;
 const MAX_ATTEMPTS_PER_IP = 60;
-const SUPER_ADMIN_USERNAME = 'ENG/2012/0001';
+const SUPER_ADMIN_USERNAME = 'ENG/2011/0001';
 const attemptMap = new Map<string, number[]>();
 
 function isRateLimited(key: string, max: number): number | null {
@@ -305,7 +305,7 @@ export async function loginWithMatricOrEmail(
     } else if (normMatric === SUPER_ADMIN_USERNAME) {
       sendJson(res, 403, {
         error:
-          'Initial Super Administrator (ENG/2012/0001) has not been provisioned yet. Complete secure server-side provisioning before signing in.',
+          'Initial Super Administrator (ENG/2011/0001) has not been provisioned yet. Complete secure server-side provisioning before signing in.',
       });
       return;
     } else {

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createClient } from '@supabase/supabase-js';
 
-const SUPER_ADMIN_USERNAME = 'ENG/2012/0001';
+const SUPER_ADMIN_USERNAME = 'ENG/2011/0001';
 const VALID_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VALID_MATRIC_REGEX = /^[A-Z0-9]+\/\d{4}\/\d+$/;
 const VALID_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -385,24 +385,49 @@ export async function provisionSupabaseStudent(
     return;
   }
 
-  // 4. Create Supabase Auth user via Admin API (immediately email-confirmed so student can log in right away)
-  // Using account_origin: 'admin_staff' works with both migration 006 and 007 triggers so profile & patient role are initialized cleanly.
+  // 4. Register single-use provisioning intent and create Supabase Auth user via Admin API
+  const rawIntentToken = crypto.randomBytes(32).toString('hex');
+  const intentTokenHash = crypto.createHash('sha256').update(rawIntentToken, 'utf8').digest('hex');
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  const { data: intentRow, error: intentErr } = await supabaseAdmin
+    .from('provisioning_intents')
+    .insert({
+      token_hash: intentTokenHash,
+      account_origin: 'admin_student',
+      target_email: normalizedEmail,
+      target_username: normMatric,
+      intended_role: 'patient',
+      issued_by: callerUser.id,
+      expires_at: expiresAt,
+    })
+    .select('id')
+    .single();
+
+  if (intentErr || !intentRow) {
+    sendJson(res, 500, { error: intentErr?.message || 'Unable to register student provisioning intent.' });
+    return;
+  }
+
   const { data: createdAuth, error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
     email: normalizedEmail,
     password,
-    email_confirm: true,
+    email_confirm: false,
+    ban_duration: '87600h',
     app_metadata: {
-      account_origin: 'admin_staff',
+      account_origin: 'admin_student',
     },
     user_metadata: {
       full_name: fullName,
       phone,
       matric_or_staff_id: normMatric,
       patient_category: 'Student',
+      provisioning_intent_token: rawIntentToken,
     },
   });
 
   if (createAuthErr || !createdAuth.user) {
+    await supabaseAdmin.from('provisioning_intents').delete().eq('id', intentRow.id).then(() => {}, () => {});
     const msg = createAuthErr?.message || 'Unable to create student account in Supabase Auth.';
     const status = msg.toLowerCase().includes('already') || msg.toLowerCase().includes('exists') ? 409 : 400;
     sendJson(res, status, { error: msg });
@@ -415,8 +440,20 @@ export async function provisionSupabaseStudent(
   let insertedNewWhitelistId: string | null = null;
   let updatedExistingWhitelistId: string | null = null;
 
-  // 5. Synchronize profiles, user_roles ('patient'), group11_student_whitelist (for matric login), and patients
+  // 5. Scrub token, synchronize profiles, user_roles ('patient'), group11_student_whitelist, and patients
   try {
+    const { error: scrubErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
+      user_metadata: {
+        full_name: fullName,
+        phone,
+        matric_or_staff_id: normMatric,
+        patient_category: 'Student',
+        provisioning_intent_token: null,
+      },
+    });
+    if (scrubErr) {
+      throw new Error(scrubErr.message);
+    }
     const { error: profErr } = await supabaseAdmin
       .from('profiles')
       .upsert(
@@ -512,6 +549,14 @@ export async function provisionSupabaseStudent(
       throw new Error(patErr?.message || 'Unable to create synchronized patient medical file.');
     }
 
+    const { error: activateErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
+      email_confirm: true,
+      ban_duration: 'none',
+    });
+    if (activateErr) {
+      throw new Error(activateErr.message);
+    }
+
     await Promise.all([
       supabaseAdmin.from('notifications').insert({
         recipient_user_id: createdUserId,
@@ -566,6 +611,7 @@ export async function provisionSupabaseStudent(
         .then(() => {}, () => {});
     }
     await supabaseAdmin.auth.admin.deleteUser(createdUserId).catch(() => {});
+    await supabaseAdmin.from('provisioning_intents').delete().eq('id', intentRow.id).then(() => {}, () => {});
 
     const message = err instanceof Error ? err.message : 'Failed to synchronize student account.';
     sendJson(res, 500, { error: `Student provisioning rolled back: ${message}` });

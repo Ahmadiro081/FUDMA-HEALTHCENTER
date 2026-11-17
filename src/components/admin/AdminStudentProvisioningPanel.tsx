@@ -137,8 +137,8 @@ export function AdminStudentProvisioningPanel({
       setFormError('Matriculation number must match format e.g. ENG/2024/33001.');
       return;
     }
-    if (cleanMatric === 'ENG/2012/0001') {
-      setFormError('ENG/2012/0001 is reserved for the Super Administrator and cannot be assigned to a student.');
+    if (cleanMatric === 'ENG/2011/0001') {
+      setFormError('ENG/2011/0001 is reserved for the Super Administrator and cannot be assigned to a student.');
       return;
     }
     if (form.password.length < 6) {

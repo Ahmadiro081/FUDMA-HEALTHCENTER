@@ -299,21 +299,47 @@ export async function provisionSupabaseStaff(
     doctorCount = count ?? 0;
   }
 
-  // 4. Create Auth user via Supabase Admin API (service_role key)
+  // 4. Create single-use provisioning intent and create Auth user via Supabase Admin API
+  const rawIntentToken = crypto.randomBytes(32).toString('hex');
+  const intentTokenHash = crypto.createHash('sha256').update(rawIntentToken, 'utf8').digest('hex');
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  const { data: intentRow, error: intentErr } = await supabaseAdmin
+    .from('provisioning_intents')
+    .insert({
+      token_hash: intentTokenHash,
+      account_origin: 'admin_staff',
+      target_email: normalizedEmail,
+      target_username: null,
+      intended_role: role,
+      issued_by: callerUser.id,
+      expires_at: expiresAt,
+    })
+    .select('id')
+    .single();
+
+  if (intentErr || !intentRow) {
+    sendJson(res, 500, { error: intentErr?.message || 'Unable to register staff provisioning intent.' });
+    return;
+  }
+
   const { data: createdAuth, error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
     email: normalizedEmail,
     password,
-    email_confirm: true,
+    email_confirm: false,
+    ban_duration: '87600h',
     app_metadata: {
       account_origin: 'admin_staff',
     },
     user_metadata: {
       full_name: fullName,
       phone,
+      provisioning_intent_token: rawIntentToken,
     },
   });
 
   if (createAuthErr || !createdAuth.user) {
+    await supabaseAdmin.from('provisioning_intents').delete().eq('id', intentRow.id).then(() => {}, () => {});
     const msg = createAuthErr?.message || 'Unable to create staff account in Supabase Auth.';
     const status = msg.toLowerCase().includes('already') || msg.toLowerCase().includes('exists') ? 409 : 400;
     sendJson(res, status, { error: msg });
@@ -322,8 +348,19 @@ export async function provisionSupabaseStaff(
 
   const createdUserId = createdAuth.user.id;
 
-  // 5. Reassign role from trigger-default 'patient' to target staff role, remove auto-patient row, and update profile
+  // 5. Scrub intent token, reassign role from trigger-default 'patient' to target staff role, remove auto-patient row, and activate
   try {
+    const { error: scrubErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
+      user_metadata: {
+        full_name: fullName,
+        phone,
+        provisioning_intent_token: null,
+      },
+    });
+    if (scrubErr) {
+      throw new Error(scrubErr.message);
+    }
+
     const { error: roleErr } = await supabaseAdmin
       .from('user_roles')
       .upsert(
@@ -375,6 +412,14 @@ export async function provisionSupabaseStaff(
       }
     }
 
+    const { error: activateErr } = await supabaseAdmin.auth.admin.updateUserById(createdUserId, {
+      email_confirm: true,
+      ban_duration: 'none',
+    });
+    if (activateErr) {
+      throw new Error(activateErr.message);
+    }
+
     await supabaseAdmin.from('activity_logs').insert({
       actor_id: callerUser.id,
       actor_name: callerProfileRes.data.full_name,
@@ -389,6 +434,7 @@ export async function provisionSupabaseStaff(
   } catch (err) {
     // Roll back the created auth user cleanly on partial failure
     await supabaseAdmin.auth.admin.deleteUser(createdUserId).catch(() => {});
+    await supabaseAdmin.from('provisioning_intents').delete().eq('id', intentRow.id).then(() => {}, () => {});
     const message = err instanceof Error ? err.message : 'Failed to finalize staff profile.';
     sendJson(res, 500, { error: `Staff provisioning rolled back: ${message}` });
   }

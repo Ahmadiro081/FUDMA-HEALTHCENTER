@@ -722,7 +722,7 @@ async function startServer(): Promise<void> {
       } else if (normMatric === SUPER_ADMIN_USERNAME) {
         res.status(403).json({
           error:
-            'Initial Super Administrator (ENG/2012/0001) has not been provisioned yet. Complete secure server-side provisioning before signing in.',
+            `Initial Super Administrator (${SUPER_ADMIN_USERNAME}) has not been provisioned yet. Complete secure server-side provisioning before signing in.`,
         });
         return;
       } else {
