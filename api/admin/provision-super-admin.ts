@@ -129,28 +129,65 @@ export function validateSuperAdminPassword(password: string): string | null {
   return null;
 }
 
-function resolveSupabaseAdminEnv(): { url: string; serviceRoleKey: string } | null {
+function isPublicAnonKey(key: string): boolean {
+  if (key.startsWith('sb_publishable_')) return true;
+  const parts = key.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as {
+      role?: string;
+    };
+    return payload.role === 'anon';
+  } catch {
+    return false;
+  }
+}
+
+function resolveSupabaseAdminEnv():
+  | { ok: true; url: string; serviceRoleKey: string }
+  | { ok: false; error: string } {
   const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
   const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   if (!url || !serviceRoleKey) {
-    return null;
+    return {
+      ok: false,
+      error:
+        'Server-side Supabase configuration is missing. Set SUPABASE_URL (or VITE_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY.',
+    };
   }
   if (
     url.includes('your-project-id') ||
     serviceRoleKey.includes('your-service-role') ||
     serviceRoleKey.length < 20
   ) {
-    return null;
+    return {
+      ok: false,
+      error:
+        'Server-side Supabase configuration contains placeholder values. Set valid SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
+    };
+  }
+  if (isPublicAnonKey(serviceRoleKey)) {
+    return {
+      ok: false,
+      error:
+        'SUPABASE_SERVICE_ROLE_KEY is currently set to a public anon/publishable key. Set the secret service_role key from Supabase Project Settings → API in server environment variables.',
+    };
   }
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      return null;
+      return {
+        ok: false,
+        error: 'SUPABASE_URL must be a valid http(s) URL.',
+      };
     }
   } catch {
-    return null;
+    return {
+      ok: false,
+      error: 'SUPABASE_URL is not a valid URL.',
+    };
   }
-  return { url, serviceRoleKey };
+  return { ok: true, url, serviceRoleKey };
 }
 
 export interface ProvisionSuperAdminParams {
@@ -353,11 +390,8 @@ export async function provisionSuperAdminHandler(
   }
 
   const env = resolveSupabaseAdminEnv();
-  if (!env) {
-    sendJson(res, 503, {
-      error:
-        'Server-side Supabase configuration is missing. Set SUPABASE_URL (or VITE_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY.',
-    });
+  if (!env.ok) {
+    sendJson(res, 503, { error: env.error });
     return;
   }
 

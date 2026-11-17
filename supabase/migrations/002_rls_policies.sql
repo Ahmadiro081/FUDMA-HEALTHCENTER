@@ -110,11 +110,11 @@ DROP POLICY IF EXISTS "Users view own profile or clinical staff view profiles" O
 CREATE POLICY "Users view own profile or clinical staff view profiles"
   ON public.profiles FOR SELECT
   USING (
-    id = auth.uid()
+    public.profiles.id = auth.uid()
     OR public.get_my_role() IN ('nurse', 'doctor', 'admin')
     OR (
       public.get_my_role() = 'patient'
-      AND EXISTS (SELECT 1 FROM public.doctors d WHERE d.profile_id = id)
+      AND EXISTS (SELECT 1 FROM public.doctors d WHERE d.profile_id = public.profiles.id)
     )
     OR (
       public.get_my_role() = 'lab'
@@ -122,9 +122,9 @@ CREATE POLICY "Users view own profile or clinical staff view profiles"
         EXISTS (
           SELECT 1 FROM public.laboratory_requests lr
           JOIN public.patients p ON p.id = lr.patient_id
-          WHERE p.profile_id = id
+          WHERE p.profile_id = public.profiles.id
         )
-        OR EXISTS (SELECT 1 FROM public.doctors d WHERE d.profile_id = id)
+        OR EXISTS (SELECT 1 FROM public.doctors d WHERE d.profile_id = public.profiles.id)
       )
     )
     OR (
@@ -133,10 +133,10 @@ CREATE POLICY "Users view own profile or clinical staff view profiles"
         EXISTS (
           SELECT 1 FROM public.prescriptions pr
           JOIN public.patients p ON p.id = pr.patient_id
-          WHERE p.profile_id = id
+          WHERE p.profile_id = public.profiles.id
         )
-        OR EXISTS (SELECT 1 FROM public.doctors d WHERE d.profile_id = id)
-        OR EXISTS (SELECT 1 FROM public.pharmacy_dispensing pd WHERE pd.dispensed_by = id)
+        OR EXISTS (SELECT 1 FROM public.doctors d WHERE d.profile_id = public.profiles.id)
+        OR EXISTS (SELECT 1 FROM public.pharmacy_dispensing pd WHERE pd.dispensed_by = public.profiles.id)
       )
     )
   );
@@ -144,8 +144,8 @@ CREATE POLICY "Users view own profile or clinical staff view profiles"
 DROP POLICY IF EXISTS "Users update own profile or admin updates any" ON public.profiles;
 CREATE POLICY "Users update own profile or admin updates any"
   ON public.profiles FOR UPDATE
-  USING (id = auth.uid() OR public.get_my_role() = 'admin')
-  WITH CHECK (id = auth.uid() OR public.get_my_role() = 'admin');
+  USING (public.profiles.id = auth.uid() OR public.get_my_role() = 'admin')
+  WITH CHECK (public.profiles.id = auth.uid() OR public.get_my_role() = 'admin');
 
 -- USER ROLES (Admin managed; users can read own role)
 DROP POLICY IF EXISTS "Users read own role or admin reads all" ON public.user_roles;
@@ -193,11 +193,11 @@ CREATE POLICY "Patients view own record; clinical staff view patients"
     OR public.get_my_role() IN ('nurse', 'doctor', 'admin')
     OR (
       public.get_my_role() = 'lab'
-      AND EXISTS (SELECT 1 FROM public.laboratory_requests lr WHERE lr.patient_id = id)
+      AND EXISTS (SELECT 1 FROM public.laboratory_requests lr WHERE lr.patient_id = public.patients.id)
     )
     OR (
       public.get_my_role() = 'pharmacy'
-      AND EXISTS (SELECT 1 FROM public.prescriptions pr WHERE pr.patient_id = id)
+      AND EXISTS (SELECT 1 FROM public.prescriptions pr WHERE pr.patient_id = public.patients.id)
     )
   );
 
@@ -338,7 +338,7 @@ CREATE POLICY "Patients view own lab results; lab/doctor/admin view"
   USING (
     EXISTS (
       SELECT 1 FROM public.laboratory_requests lr
-      WHERE lr.id = lab_request_id AND lr.patient_id = public.get_my_patient_id()
+      WHERE lr.id = public.laboratory_results.lab_request_id AND lr.patient_id = public.get_my_patient_id()
     )
     OR public.get_my_role() IN ('lab', 'doctor', 'admin')
   );
@@ -363,14 +363,14 @@ CREATE POLICY "Lab staff edit unreviewed results; doctors mark reviewed"
       public.get_my_role() = 'lab'
       AND EXISTS (
         SELECT 1 FROM public.laboratory_requests lr
-        WHERE lr.id = lab_request_id AND lr.status <> 'Reviewed'
+        WHERE lr.id = public.laboratory_results.lab_request_id AND lr.status <> 'Reviewed'
       )
     )
     OR (
       public.get_my_role() = 'doctor'
       AND EXISTS (
         SELECT 1 FROM public.laboratory_requests lr
-        WHERE lr.id = lab_request_id AND lr.doctor_id = public.get_my_doctor_id() AND lr.status = 'Completed'
+        WHERE lr.id = public.laboratory_results.lab_request_id AND lr.doctor_id = public.get_my_doctor_id() AND lr.status = 'Completed'
       )
     )
   )
@@ -422,7 +422,7 @@ CREATE POLICY "Patients view own prescription items; doctor/pharmacy/admin view"
   USING (
     EXISTS (
       SELECT 1 FROM public.prescriptions pr
-      WHERE pr.id = prescription_id AND pr.patient_id = public.get_my_patient_id()
+      WHERE pr.id = public.prescription_items.prescription_id AND pr.patient_id = public.get_my_patient_id()
     )
     OR public.get_my_role() IN ('doctor', 'pharmacy', 'admin')
   );
@@ -439,7 +439,7 @@ CREATE POLICY "Doctors insert items for own prescriptions"
       public.get_my_role() = 'doctor'
       AND EXISTS (
         SELECT 1 FROM public.prescriptions pr
-        WHERE pr.id = prescription_id AND pr.doctor_id = public.get_my_doctor_id()
+        WHERE pr.id = public.prescription_items.prescription_id AND pr.doctor_id = public.get_my_doctor_id()
       )
     )
   );

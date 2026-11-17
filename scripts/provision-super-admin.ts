@@ -53,6 +53,24 @@ async function main(): Promise<void> {
     );
     process.exit(1);
   }
+  const keyParts = serviceRoleKey.split('.');
+  let isAnonJwt = serviceRoleKey.startsWith('sb_publishable_');
+  if (!isAnonJwt && keyParts.length === 3) {
+    try {
+      const payload = JSON.parse(Buffer.from(keyParts[1], 'base64url').toString('utf-8')) as {
+        role?: string;
+      };
+      isAnonJwt = payload.role === 'anon';
+    } catch {
+      // Ignore malformed JWT parsing
+    }
+  }
+  if (isAnonJwt) {
+    console.error(
+      'ERROR: SUPABASE_SERVICE_ROLE_KEY is set to a public anon/publishable key. Replace it with the secret service_role key from Supabase Project Settings -> API.'
+    );
+    process.exit(1);
+  }
 
   console.log('=== FUDMA HEALTHCENTER Secure Super Admin Provisioning ===');
   console.log(`Login Username : ${SUPER_ADMIN_USERNAME}`);
