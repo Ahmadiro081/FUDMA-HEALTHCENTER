@@ -2454,9 +2454,14 @@ async function startServer(): Promise<void> {
       })
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
 
+    const activeStudentsCount = students.filter((s) => s.is_active).length;
+
     res.json({
       stats: {
         total_patients: db.patients.length,
+        total_students: students.length,
+        active_students: activeStudentsCount,
+        inactive_students: students.length - activeStudentsCount,
         total_staff: staff.length,
         total_appointments: db.appointments.length,
         todays_appointments: db.appointments.filter((a) => a.appointment_date === today).length,
@@ -2489,15 +2494,122 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    if (req.method !== 'POST' && req.method !== 'PATCH') {
-      res.status(405).json({ error: 'Method not allowed. Use POST or PATCH.' });
+    if (
+      req.method !== 'GET' &&
+      req.method !== 'POST' &&
+      req.method !== 'PUT' &&
+      req.method !== 'PATCH'
+    ) {
+      res.status(405).json({ error: 'Method not allowed. Use GET, POST, PUT, or PATCH.' });
       return;
     }
 
     requireAuth(req, res, () => {
-      requireRole('admin', 'super_admin')(req, res, () => {
+      requireRole('super_admin')(req, res, () => {
         const db = loadDb();
         const admin = req.currentUser!;
+
+        const mapLocalStudent = (p: (typeof db.patients)[number]) => {
+          const linkedUser = p.profile_id ? db.users.find((u) => u.id === p.profile_id) : null;
+          const normMatric = p.matric_or_staff_id ? normalizeMatricNumber(p.matric_or_staff_id) : null;
+          const isWhitelisted = db.group11_student_whitelist.some(
+            (w) =>
+              (p.profile_id && w.registered_user_id === p.profile_id) ||
+              (normMatric && normalizeMatricNumber(w.matric_number) === normMatric)
+          );
+          return {
+            user_id: p.profile_id,
+            patient_id: p.id,
+            hospital_number: p.hospital_number,
+            matric_number: normMatric,
+            full_name: linkedUser?.full_name || p.full_name,
+            email: linkedUser?.email || p.email,
+            department: p.faculty_or_unit,
+            phone: linkedUser?.phone || p.phone,
+            gender: linkedUser?.gender ?? p.gender,
+            date_of_birth: linkedUser?.date_of_birth ?? p.date_of_birth,
+            address: linkedUser?.address ?? p.address,
+            blood_group: p.blood_group || 'Unknown',
+            genotype: p.genotype || 'Unknown',
+            allergies: p.allergies,
+            emergency_contact_name: p.emergency_contact_name,
+            emergency_contact_phone: p.emergency_contact_phone,
+            is_active: linkedUser ? linkedUser.is_active : false,
+            is_walk_in: p.is_walk_in,
+            is_whitelisted: isWhitelisted,
+            has_auth_account: Boolean(p.profile_id),
+            created_at: p.created_at,
+            updated_at: linkedUser?.updated_at || p.updated_at || p.created_at,
+          };
+        };
+
+        if (req.method === 'GET') {
+          const detailPatientId = String(req.query.patient_id || '').trim();
+          if (detailPatientId) {
+            const pat = db.patients.find(
+              (p) => p.id === detailPatientId && p.patient_category === 'Student'
+            );
+            if (!pat) {
+              res.status(404).json({ error: 'Student record not found.' });
+              return;
+            }
+            const appts = db.appointments.filter((a) => a.patient_id === pat.id);
+            const vitals = db.vitals.filter((v) => v.patient_id === pat.id);
+            const cons = db.consultations.filter((c) => c.patient_id === pat.id);
+            const labs = db.laboratory_requests.filter((l) => l.patient_id === pat.id);
+            const rxs = db.prescriptions.filter((r) => r.patient_id === pat.id);
+
+            res.json({
+              student: {
+                ...mapLocalStudent(pat),
+                clinical_summary: {
+                  appointments_count: appts.length,
+                  vitals_count: vitals.length,
+                  consultations_count: cons.length,
+                  lab_requests_count: labs.length,
+                  prescriptions_count: rxs.length,
+                },
+                recent_appointments: appts.slice(0, 5).map((a) => ({
+                  id: a.id,
+                  appointment_code: a.appointment_code,
+                  consultation_category: a.consultation_category,
+                  appointment_date: a.appointment_date,
+                  appointment_time: a.appointment_time,
+                  status: a.status,
+                })),
+                recent_consultations: cons.slice(0, 5).map((c) => ({
+                  id: c.id,
+                  diagnosis: c.diagnosis,
+                  status: c.status,
+                  created_at: c.created_at,
+                })),
+                recent_prescriptions: rxs.slice(0, 5).map((r) => ({
+                  id: r.id,
+                  prescription_code: r.prescription_code,
+                  status: r.status,
+                  created_at: r.created_at,
+                })),
+              },
+            });
+            return;
+          }
+
+          const students = db.patients
+            .filter((p) => p.patient_category === 'Student')
+            .map(mapLocalStudent)
+            .sort((a, b) => b.created_at.localeCompare(a.created_at));
+          const activeStudents = students.filter((s) => s.is_active).length;
+
+          res.json({
+            students,
+            stats: {
+              total_students: students.length,
+              active_students: activeStudents,
+              inactive_students: students.length - activeStudents,
+            },
+          });
+          return;
+        }
 
         if (req.method === 'PATCH') {
           const { user_id, is_active } = req.body ?? {};
@@ -2524,6 +2636,361 @@ async function startServer(): Promise<void> {
           });
           saveDb(db);
           res.json({ ok: true, user_id: target.id, is_active: target.is_active });
+          return;
+        }
+
+        if (req.method === 'PUT') {
+          const {
+            patient_id,
+            full_name,
+            matric_number,
+            department,
+            faculty_or_unit,
+            email,
+            phone,
+            gender,
+            date_of_birth,
+            address,
+            blood_group,
+            genotype,
+            allergies,
+            emergency_contact_name,
+            emergency_contact_phone,
+          } = req.body ?? {};
+
+          const pat = db.patients.find(
+            (p) => p.id === String(patient_id || '').trim() && p.patient_category === 'Student'
+          );
+          if (!pat) {
+            res.status(404).json({ error: 'Student patient record not found.' });
+            return;
+          }
+
+          const cleanName = String(full_name || '').trim();
+          const normMatric = normalizeMatricNumber(matric_number);
+          const cleanDept = String(department || faculty_or_unit || '').trim();
+          const normalizedEmail = String(email || '').trim().toLowerCase();
+
+          if (!cleanName || cleanName.length < 2 || cleanName.length > 120) {
+            res.status(400).json({ error: 'Student full name must be between 2 and 120 characters.' });
+            return;
+          }
+          if (!normMatric || !/^[A-Z0-9]+\/\d{4}\/\d+$/.test(normMatric)) {
+            res.status(400).json({ error: 'Invalid matriculation number format.' });
+            return;
+          }
+          if (
+            normMatric === SUPER_ADMIN_USERNAME ||
+            db.privileged_accounts.some((p) => normalizeMatricNumber(p.login_username) === normMatric)
+          ) {
+            res.status(403).json({ error: `${normMatric} is reserved for the Super Administrator.` });
+            return;
+          }
+          if (!cleanDept || !normalizedEmail || !VALID_EMAIL_REGEX.test(normalizedEmail)) {
+            res.status(400).json({ error: 'Valid academic department and student email are required.' });
+            return;
+          }
+          if (db.patients.some((p) => p.id !== pat.id && normalizeMatricNumber(p.matric_or_staff_id) === normMatric)) {
+            res.status(409).json({ error: `Matriculation number ${normMatric} belongs to another patient.` });
+            return;
+          }
+          if (db.users.some((u) => u.id !== pat.profile_id && u.email.toLowerCase() === normalizedEmail)) {
+            res.status(409).json({ error: 'Another account already uses this student email address.' });
+            return;
+          }
+
+          const now = new Date().toISOString();
+          const cleanPhone = phone ? String(phone).trim() : null;
+          const cleanGender = gender && ALLOWED_GENDERS.has(String(gender)) ? (String(gender) as 'Male' | 'Female' | 'Other') : null;
+          const cleanDob = date_of_birth && isValidCalendarDate(String(date_of_birth)) ? String(date_of_birth) : null;
+          const cleanAddr = address ? String(address).trim() : null;
+
+          if (pat.profile_id) {
+            const linkedUser = db.users.find((u) => u.id === pat.profile_id);
+            if (linkedUser) {
+              linkedUser.full_name = cleanName;
+              linkedUser.email = normalizedEmail;
+              linkedUser.phone = cleanPhone;
+              linkedUser.gender = cleanGender;
+              linkedUser.date_of_birth = cleanDob;
+              linkedUser.address = cleanAddr;
+              linkedUser.updated_at = now;
+            }
+            const wl = db.group11_student_whitelist.find((w) => w.registered_user_id === pat.profile_id);
+            if (wl) {
+              wl.full_name = cleanName;
+              wl.matric_number = normMatric;
+              wl.department = cleanDept;
+            } else {
+              db.group11_student_whitelist.push({
+                id: crypto.randomUUID(),
+                full_name: cleanName,
+                matric_number: normMatric,
+                department: cleanDept,
+                is_registered: true,
+                registered_user_id: pat.profile_id,
+                created_at: now,
+                registered_at: now,
+              });
+            }
+          }
+
+          pat.full_name = cleanName;
+          pat.email = normalizedEmail;
+          pat.phone = cleanPhone;
+          pat.gender = cleanGender;
+          pat.date_of_birth = cleanDob;
+          pat.address = cleanAddr;
+          pat.matric_or_staff_id = normMatric;
+          pat.faculty_or_unit = cleanDept;
+          pat.blood_group = blood_group ? String(blood_group) : 'Unknown';
+          pat.genotype = genotype ? String(genotype) : 'Unknown';
+          pat.allergies = allergies ? String(allergies).trim() : 'None reported';
+          pat.emergency_contact_name = emergency_contact_name ? String(emergency_contact_name).trim() : null;
+          pat.emergency_contact_phone = emergency_contact_phone ? String(emergency_contact_phone).trim() : null;
+          pat.updated_at = now;
+
+          addActivityLog(db, {
+            actor_id: admin.id,
+            actor_name: admin.full_name,
+            actor_role: admin.role,
+            action: 'ADMIN_STUDENT_UPDATED',
+            entity_type: 'patient',
+            entity_id: pat.hospital_number,
+            details: `Updated student profile for ${cleanName} (${normMatric}, ${cleanDept}).`,
+          });
+          saveDb(db);
+          res.json({ ok: true, student: mapLocalStudent(pat) });
+          return;
+        }
+
+        const action = String(req.body?.action || 'create').trim();
+        if (action === 'bulk_preview' || action === 'bulk_import') {
+          const rawRows = Array.isArray(req.body?.rows) ? (req.body.rows as Record<string, unknown>[]) : [];
+          if (rawRows.length === 0) {
+            res.status(400).json({ error: 'Upload at least one student row before running bulk import.' });
+            return;
+          }
+
+          const seenMatrics = new Set<string>();
+          const seenEmails = new Set<string>();
+          const evaluated = rawRows.map((row, idx) => {
+            const rowNum = Number(row.row_number) || idx + 1;
+            const cleanName = String(row.full_name || '').trim();
+            const normMatric = normalizeMatricNumber(row.matric_number);
+            const cleanDept = String(row.department || row.faculty_or_unit || '').trim();
+            const normalizedEmail = String(row.email || '').trim().toLowerCase();
+            const passStr = row.password ? String(row.password) : '';
+            const errors: string[] = [];
+            let isDup = false;
+
+            if (!cleanName || cleanName.length < 2 || cleanName.length > 120) {
+              errors.push('Full name must be between 2 and 120 characters.');
+            }
+            if (!normMatric || !/^[A-Z0-9]+\/\d{4}\/\d+$/.test(normMatric)) {
+              errors.push('Invalid matriculation number format.');
+            } else if (normMatric === SUPER_ADMIN_USERNAME) {
+              errors.push('ENG/2011/0001 is reserved for the Super Administrator.');
+            } else if (
+              db.patients.some((p) => normalizeMatricNumber(p.matric_or_staff_id) === normMatric) ||
+              db.group11_student_whitelist.some(
+                (w) => normalizeMatricNumber(w.matric_number) === normMatric && (w.is_registered || w.registered_user_id)
+              )
+            ) {
+              isDup = true;
+              errors.push(`Matriculation number ${normMatric} already exists in database.`);
+            } else if (seenMatrics.has(normMatric)) {
+              isDup = true;
+              errors.push(`Duplicate matriculation number ${normMatric} within file.`);
+            }
+            if (normMatric) seenMatrics.add(normMatric);
+
+            if (!cleanDept) errors.push('Academic department is required.');
+            if (!normalizedEmail || !VALID_EMAIL_REGEX.test(normalizedEmail)) {
+              errors.push('Valid student email is required.');
+            } else if (db.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
+              isDup = true;
+              errors.push(`Email ${normalizedEmail} already exists in database.`);
+            } else if (seenEmails.has(normalizedEmail)) {
+              isDup = true;
+              errors.push(`Duplicate email ${normalizedEmail} within file.`);
+            }
+            if (normalizedEmail) seenEmails.add(normalizedEmail);
+
+            const cleanDob =
+              row.date_of_birth && isValidCalendarDate(String(row.date_of_birth).trim())
+                ? String(row.date_of_birth).trim()
+                : null;
+            const cleanGender =
+              row.gender && ALLOWED_GENDERS.has(String(row.gender).trim())
+                ? (String(row.gender).trim() as 'Male' | 'Female' | 'Other')
+                : null;
+
+            const status =
+              errors.length === 0 ? 'valid' : isDup ? 'duplicate' : 'invalid';
+
+            return {
+              row_number: rowNum,
+              status,
+              errors,
+              rawPassword: passStr,
+              normalized: {
+                full_name: cleanName,
+                matric_number: normMatric,
+                department: cleanDept,
+                email: normalizedEmail,
+                has_custom_password: Boolean(passStr.trim()),
+                phone: row.phone ? String(row.phone).trim() : null,
+                gender: cleanGender,
+                date_of_birth: cleanDob,
+                address: row.address ? String(row.address).trim() : null,
+                blood_group: row.blood_group && ALLOWED_BLOOD_GROUPS.has(String(row.blood_group)) ? String(row.blood_group) : 'Unknown',
+                genotype: row.genotype && ALLOWED_GENOTYPES.has(String(row.genotype)) ? String(row.genotype) : 'Unknown',
+                allergies: row.allergies ? String(row.allergies).trim() : 'None reported',
+                emergency_contact_name: row.emergency_contact_name ? String(row.emergency_contact_name).trim() : null,
+                emergency_contact_phone: row.emergency_contact_phone ? String(row.emergency_contact_phone).trim() : null,
+              },
+            };
+          });
+
+          if (action === 'bulk_preview') {
+            res.json({
+              ok: true,
+              rows: evaluated.map(({ rawPassword: _pw, ...rest }) => rest),
+            });
+            return;
+          }
+
+          let createdCount = 0;
+          let skippedDupCount = 0;
+          let failedCount = 0;
+          const results: Array<Record<string, unknown>> = [];
+
+          for (const item of evaluated) {
+            if (item.status === 'duplicate') {
+              skippedDupCount += 1;
+              results.push({
+                row_number: item.row_number,
+                full_name: item.normalized.full_name,
+                matric_number: item.normalized.matric_number,
+                email: item.normalized.email,
+                department: item.normalized.department,
+                status: 'skipped_duplicate',
+                message: item.errors.join(' '),
+              });
+              continue;
+            }
+            if (item.status === 'invalid') {
+              failedCount += 1;
+              results.push({
+                row_number: item.row_number,
+                full_name: item.normalized.full_name,
+                matric_number: item.normalized.matric_number,
+                email: item.normalized.email,
+                department: item.normalized.department,
+                status: 'failed',
+                message: item.errors.join(' '),
+              });
+              continue;
+            }
+
+            const now = new Date().toISOString();
+            const userId = crypto.randomUUID();
+            const assignedPassword = item.rawPassword.trim() || `Fudma!${crypto.randomBytes(4).toString('hex')}`;
+            const hospNum = `FUDMA-HC-26-${String(db.patients.length + 101).padStart(4, '0')}`;
+
+            db.users.unshift({
+              id: userId,
+              full_name: item.normalized.full_name,
+              email: item.normalized.email,
+              phone: item.normalized.phone,
+              gender: item.normalized.gender,
+              date_of_birth: item.normalized.date_of_birth,
+              address: item.normalized.address,
+              is_active: true,
+              role: 'patient',
+              password_hash: hashPassword(assignedPassword),
+              created_at: now,
+              updated_at: now,
+            });
+            db.patients.unshift({
+              id: crypto.randomUUID(),
+              profile_id: userId,
+              hospital_number: hospNum,
+              matric_or_staff_id: item.normalized.matric_number,
+              patient_category: 'Student',
+              faculty_or_unit: item.normalized.department,
+              blood_group: item.normalized.blood_group,
+              genotype: item.normalized.genotype,
+              allergies: item.normalized.allergies,
+              emergency_contact_name: item.normalized.emergency_contact_name,
+              emergency_contact_phone: item.normalized.emergency_contact_phone,
+              is_walk_in: false,
+              full_name: item.normalized.full_name,
+              email: item.normalized.email,
+              phone: item.normalized.phone,
+              gender: item.normalized.gender,
+              date_of_birth: item.normalized.date_of_birth,
+              address: item.normalized.address,
+              created_at: now,
+              updated_at: now,
+            });
+            const existingWl = db.group11_student_whitelist.find(
+              (w) => normalizeMatricNumber(w.matric_number) === item.normalized.matric_number
+            );
+            if (existingWl) {
+              existingWl.full_name = item.normalized.full_name;
+              existingWl.department = item.normalized.department;
+              existingWl.is_registered = true;
+              existingWl.registered_user_id = userId;
+              existingWl.registered_at = now;
+            } else {
+              db.group11_student_whitelist.push({
+                id: crypto.randomUUID(),
+                full_name: item.normalized.full_name,
+                matric_number: item.normalized.matric_number,
+                department: item.normalized.department,
+                is_registered: true,
+                registered_user_id: userId,
+                created_at: now,
+                registered_at: now,
+              });
+            }
+
+            createdCount += 1;
+            results.push({
+              row_number: item.row_number,
+              full_name: item.normalized.full_name,
+              matric_number: item.normalized.matric_number,
+              email: item.normalized.email,
+              department: item.normalized.department,
+              status: 'created',
+              message: 'Student account created and synchronized.',
+              hospital_number: hospNum,
+              generated_password: assignedPassword,
+            });
+          }
+
+          addActivityLog(db, {
+            actor_id: admin.id,
+            actor_name: admin.full_name,
+            actor_role: admin.role,
+            action: 'ADMIN_STUDENT_BULK_IMPORTED',
+            entity_type: 'patient',
+            entity_id: `BATCH-${rawRows.length}`,
+            details: `Bulk student import completed: ${createdCount} created, ${skippedDupCount} duplicates skipped, ${failedCount} failed.`,
+          });
+          saveDb(db);
+          res.json({
+            ok: true,
+            summary: {
+              total: rawRows.length,
+              created: createdCount,
+              skipped_duplicate: skippedDupCount,
+              failed: failedCount,
+              results,
+            },
+          });
           return;
         }
 
@@ -2683,7 +3150,7 @@ async function startServer(): Promise<void> {
         addNotification(db, {
           recipient_user_id: userId,
           title: 'Welcome to FUDMA HEALTHCENTER',
-          message: `Your student portal account (${hospNum}) for ${normMatric} was provisioned by Administration.`,
+          message: `Your student portal account (${hospNum}) for ${normMatric} was provisioned by Super Administration.`,
           category: 'account',
         });
         addActivityLog(db, {
@@ -2699,21 +3166,7 @@ async function startServer(): Promise<void> {
 
         res.status(201).json({
           ok: true,
-          student: {
-            user_id: userId,
-            patient_id: studentPatient.id,
-            hospital_number: hospNum,
-            matric_number: normMatric,
-            full_name: cleanName,
-            email: normalizedEmail,
-            department: cleanDept,
-            phone: cleanPhone,
-            blood_group: studentPatient.blood_group,
-            genotype: studentPatient.genotype,
-            is_active: true,
-            is_walk_in: false,
-            created_at: now,
-          },
+          student: mapLocalStudent(studentPatient),
         });
       });
     });

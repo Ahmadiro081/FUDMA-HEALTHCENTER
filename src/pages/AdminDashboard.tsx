@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Activity,
   Building2,
@@ -8,8 +9,10 @@ import {
   LayoutDashboard,
   Settings,
   ShieldCheck,
+  UserCheck,
   UserPlus,
   Users,
+  UserX,
 } from 'lucide-react';
 import {
   Bar,
@@ -21,7 +24,6 @@ import {
   YAxis,
 } from 'recharts';
 import { DashboardLayout, type SidebarNavItem } from '../components/DashboardLayout';
-import { AdminStudentProvisioningPanel } from '../components/admin/AdminStudentProvisioningPanel';
 import { LoadingSkeleton } from '../components/ui/EmptyState';
 import { StatCard } from '../components/ui/StatCard';
 import { StatusBadge } from '../components/ui/StatusBadge';
@@ -30,25 +32,42 @@ import { useToast } from '../context/ToastContext';
 import { api } from '../lib/api';
 import type {
   ActivityLog,
+  AdminOverviewStats,
   Appointment,
   Department,
   PatientRecord,
   StaffAccountSummary,
-  StudentAccountSummary,
   SystemSettings,
   UserRole,
 } from '../types/hospital';
 
+const VALID_ADMIN_TABS = new Set([
+  'overview',
+  'staff',
+  'departments',
+  'operations',
+  'logs',
+  'settings',
+]);
+
 export function AdminDashboard() {
   const { user } = useAuth();
   const { showToast } = useToast();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isSuperAdmin = user?.role === 'super_admin';
 
-  const [activeTab, setActiveTab] = useState('overview');
+  const initialTabParam = searchParams.get('tab') || 'overview';
+  const [activeTab, setActiveTab] = useState(
+    VALID_ADMIN_TABS.has(initialTabParam) ? initialTabParam : 'overview'
+  );
   const [logFilter, setLogFilter] = useState<'all' | 'super_admin'>('all');
   const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState({
+  const [stats, setStats] = useState<AdminOverviewStats>({
     total_patients: 0,
+    total_students: 0,
+    active_students: 0,
+    inactive_students: 0,
     total_staff: 0,
     total_appointments: 0,
     todays_appointments: 0,
@@ -57,7 +76,6 @@ export function AdminDashboard() {
     low_stock_medications: 0,
   });
   const [staff, setStaff] = useState<StaffAccountSummary[]>([]);
-  const [students, setStudents] = useState<StudentAccountSummary[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [patients, setPatients] = useState<PatientRecord[]>([]);
@@ -97,7 +115,6 @@ export function AdminDashboard() {
       ]);
       setStats(ovRes.stats);
       setStaff(ovRes.staff);
-      setStudents(ovRes.students || []);
       setDepartments(ovRes.departments);
       setActivityLogs(ovRes.activity_logs);
       setSettings(ovRes.settings);
@@ -117,6 +134,13 @@ export function AdminDashboard() {
   useEffect(() => {
     void loadAdminData();
   }, [loadAdminData]);
+
+  useEffect(() => {
+    const paramTab = searchParams.get('tab') || 'overview';
+    if (VALID_ADMIN_TABS.has(paramTab) && paramTab !== activeTab) {
+      setActiveTab(paramTab);
+    }
+  }, [searchParams, activeTab]);
 
   const apptStatusChart = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -178,31 +202,6 @@ export function AdminDashboard() {
     }
   };
 
-  const handleCreateStudent = async (payload: Record<string, unknown>) => {
-    const res = await api.admin.createStudent(payload);
-    showToast(
-      `Student account created & synced for ${res.student.full_name}`,
-      'success',
-      `Matric: ${res.student.matric_number || 'N/A'}`
-    );
-    await loadAdminData();
-    return { student: res.student };
-  };
-
-  const handleToggleStudentActive = async (student: StudentAccountSummary) => {
-    if (!student.user_id) return;
-    try {
-      await api.admin.updateStudentStatus(student.user_id, !student.is_active);
-      showToast(
-        `${student.full_name} portal login ${student.is_active ? 'deactivated' : 'activated'}`,
-        'info'
-      );
-      await loadAdminData();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Unable to update student portal status', 'error');
-    }
-  };
-
   const handleCreateDepartment = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreatingDept(true);
@@ -242,9 +241,26 @@ export function AdminDashboard() {
     }
   };
 
+  const handleTabChange = (nextTab: string) => {
+    if (nextTab === 'students') {
+      if (isSuperAdmin) {
+        navigate('/portal/admin/student-management');
+      }
+      return;
+    }
+    setActiveTab(nextTab);
+    if (nextTab === 'overview') {
+      setSearchParams({});
+    } else {
+      setSearchParams({ tab: nextTab });
+    }
+  };
+
   const navItems: SidebarNavItem[] = [
     { id: 'overview', label: 'Hospital Overview', icon: <LayoutDashboard className="w-4 h-4" /> },
-    { id: 'students', label: 'Student Accounts', icon: <GraduationCap className="w-4 h-4" /> },
+    ...(isSuperAdmin
+      ? [{ id: 'students', label: 'Student Management', icon: <GraduationCap className="w-4 h-4" /> }]
+      : []),
     { id: 'staff', label: 'Staff & Roles', icon: <ShieldCheck className="w-4 h-4" /> },
     { id: 'departments', label: 'Departments', icon: <Building2 className="w-4 h-4" /> },
     { id: 'operations', label: 'Patients & Appointments', icon: <Users className="w-4 h-4" /> },
@@ -254,7 +270,6 @@ export function AdminDashboard() {
 
   const breadcrumbMap: Record<string, string> = {
     overview: 'Administrator Overview',
-    students: 'Student Portal Provisioning & Sync',
     staff: 'Staff Accounts & Role Management',
     departments: 'Clinical Departments',
     operations: 'Patients & Appointments Monitor',
@@ -268,20 +283,22 @@ export function AdminDashboard() {
       breadcrumb={breadcrumbMap[activeTab] || (isSuperAdmin ? 'Super Administrator' : 'Administrator')}
       navItems={navItems}
       activeTab={activeTab}
-      onTabChange={setActiveTab}
+      onTabChange={handleTabChange}
       headerAction={
         <div className="flex items-center gap-2">
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={() => navigate('/portal/admin/student-management')}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+            >
+              <GraduationCap className="w-3.5 h-3.5 text-[#0F4C81]" />
+              <span>Manage Students</span>
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setActiveTab('students')}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
-          >
-            <GraduationCap className="w-3.5 h-3.5 text-[#0F4C81]" />
-            <span>Provision Student</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('staff')}
+            onClick={() => handleTabChange('staff')}
             className="inline-flex items-center gap-1.5 rounded-lg bg-[#0F4C81] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#0369A1] whitespace-nowrap shrink-0"
           >
             <UserPlus className="w-3.5 h-3.5" />
@@ -345,55 +362,95 @@ export function AdminDashboard() {
           </div>
 
           {activeTab === 'overview' && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 rounded-lg border border-slate-200 bg-white p-5">
-                <h2 className="text-sm font-bold text-slate-900">Appointments by Workflow Status</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Live distribution across hospital queues</p>
-                <div className="h-72 mt-4">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={apptStatusChart} margin={{ top: 8, right: 12, left: -16, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-                      <XAxis dataKey="status" tick={{ fontSize: 11, fill: '#475569' }} />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#475569' }} />
-                      <Tooltip />
-                      <Bar dataKey="count" fill="#0F4C81" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-slate-200 bg-white p-5">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                  <h2 className="text-sm font-bold text-slate-900">Recent Audit Events</h2>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('logs')}
-                    className="text-xs font-semibold text-[#0369A1] hover:underline"
-                  >
-                    Full log
-                  </button>
-                </div>
-                <div className="mt-3 space-y-3">
-                  {activityLogs.slice(0, 6).map((log) => (
-                    <div key={log.id} className="pb-2.5 border-b border-slate-100 last:border-0 text-xs">
-                      <p className="font-semibold text-slate-900">{log.action}</p>
-                      <p className="text-slate-600 mt-0.5">{log.details}</p>
-                      <p className="text-[11px] font-mono text-slate-400 mt-0.5">
-                        {log.actor_name} ({log.actor_role}) · {new Date(log.created_at).toLocaleTimeString()}
+            <div className="space-y-6">
+              {isSuperAdmin && (
+                <div className="rounded-lg border border-slate-200 bg-white p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-sm font-bold text-slate-900">
+                        Student Portal Account Metrics
+                      </h2>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Live summary of registered, active, and deactivated student accounts
                       </p>
                     </div>
-                  ))}
+                    <button
+                      type="button"
+                      onClick={() => navigate('/portal/admin/student-management')}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#0F4C81] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#0369A1] whitespace-nowrap"
+                    >
+                      <GraduationCap className="w-3.5 h-3.5" />
+                      <span>Open Student Management</span>
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <StatCard
+                      label="Total Students"
+                      value={stats.total_students}
+                      hint="All registered student profiles"
+                      icon={<GraduationCap className="w-5 h-5" />}
+                      accent="blue"
+                    />
+                    <StatCard
+                      label="Active Students"
+                      value={stats.active_students}
+                      hint="Portal access enabled"
+                      icon={<UserCheck className="w-5 h-5" />}
+                      accent="emerald"
+                    />
+                    <StatCard
+                      label="Inactive Students"
+                      value={stats.inactive_students}
+                      hint="Deactivated / login blocked"
+                      icon={<UserX className="w-5 h-5" />}
+                      accent="red"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 rounded-lg border border-slate-200 bg-white p-5">
+                  <h2 className="text-sm font-bold text-slate-900">Appointments by Workflow Status</h2>
+                  <p className="text-xs text-slate-500 mt-0.5">Live distribution across hospital queues</p>
+                  <div className="h-72 mt-4">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={apptStatusChart} margin={{ top: 8, right: 12, left: -16, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                        <XAxis dataKey="status" tick={{ fontSize: 11, fill: '#475569' }} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#475569' }} />
+                        <Tooltip />
+                        <Bar dataKey="count" fill="#0F4C81" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-white p-5">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                    <h2 className="text-sm font-bold text-slate-900">Recent Audit Events</h2>
+                    <button
+                      type="button"
+                      onClick={() => handleTabChange('logs')}
+                      className="text-xs font-semibold text-[#0369A1] hover:underline"
+                    >
+                      Full log
+                    </button>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {activityLogs.slice(0, 6).map((log) => (
+                      <div key={log.id} className="pb-2.5 border-b border-slate-100 last:border-0 text-xs">
+                        <p className="font-semibold text-slate-900">{log.action}</p>
+                        <p className="text-slate-600 mt-0.5">{log.details}</p>
+                        <p className="text-[11px] font-mono text-slate-400 mt-0.5">
+                          {log.actor_name} ({log.actor_role}) · {new Date(log.created_at).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
-          )}
-
-          {activeTab === 'students' && (
-            <AdminStudentProvisioningPanel
-              students={students}
-              onCreateStudent={handleCreateStudent}
-              onToggleStudentActive={handleToggleStudentActive}
-            />
           )}
 
           {activeTab === 'staff' && (

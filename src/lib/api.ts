@@ -2,9 +2,13 @@ import { hasAnySupabaseConfig, isSupabaseConfigured } from './supabase';
 import { supabaseApi } from './supabaseApi';
 import type {
   ActivityLog,
+  AdminOverviewStats,
   AppNotification,
   Appointment,
   AuthUser,
+  BulkStudentImportInputRow,
+  BulkStudentImportSummary,
+  BulkStudentPreviewRow,
   Consultation,
   Department,
   DoctorRecord,
@@ -16,7 +20,9 @@ import type {
   Prescription,
   StaffAccountSummary,
   StudentAccountSummary,
+  StudentDetailRecord,
   SystemSettings,
+  UpdateStudentPayload,
   UserRole,
 } from '../types/hospital';
 
@@ -296,15 +302,7 @@ export const api = {
       isSupabaseConfigured()
         ? supabaseApi.admin.overview()
         : localRequest<{
-            stats: {
-              total_patients: number;
-              total_staff: number;
-              total_appointments: number;
-              todays_appointments: number;
-              pending_labs: number;
-              pending_prescriptions: number;
-              low_stock_medications: number;
-            };
+            stats: AdminOverviewStats;
             staff: StaffAccountSummary[];
             students: StudentAccountSummary[];
             departments: Department[];
@@ -318,11 +316,31 @@ export const api = {
             method: 'POST',
             body: JSON.stringify(payload),
           }),
+    listStudents: () =>
+      isSupabaseConfigured()
+        ? supabaseApi.admin.listStudents()
+        : localRequest<{
+            students: StudentAccountSummary[];
+            stats: { total_students: number; active_students: number; inactive_students: number };
+          }>('/api/admin/students'),
+    getStudentDetail: (patientId: string) =>
+      isSupabaseConfigured()
+        ? supabaseApi.admin.getStudentDetail(patientId)
+        : localRequest<{ student: StudentDetailRecord }>(
+            `/api/admin/students?patient_id=${encodeURIComponent(patientId)}`
+          ),
     createStudent: (payload: Record<string, unknown>) =>
       isSupabaseConfigured()
         ? supabaseApi.admin.createStudent(payload)
         : localRequest<{ ok: boolean; student: StudentAccountSummary }>('/api/admin/students', {
             method: 'POST',
+            body: JSON.stringify(payload),
+          }),
+    updateStudent: (payload: UpdateStudentPayload) =>
+      isSupabaseConfigured()
+        ? supabaseApi.admin.updateStudent(payload)
+        : localRequest<{ ok: boolean; student: StudentAccountSummary }>('/api/admin/students', {
+            method: 'PUT',
             body: JSON.stringify(payload),
           }),
     updateStudentStatus: (userId: string, isActive: boolean) =>
@@ -331,6 +349,20 @@ export const api = {
         : localRequest<{ ok: boolean }>('/api/admin/students', {
             method: 'PATCH',
             body: JSON.stringify({ user_id: userId, is_active: isActive }),
+          }),
+    bulkPreviewStudents: (rows: BulkStudentImportInputRow[]) =>
+      isSupabaseConfigured()
+        ? supabaseApi.admin.bulkPreviewStudents(rows)
+        : localRequest<{ rows: BulkStudentPreviewRow[] }>('/api/admin/students', {
+            method: 'POST',
+            body: JSON.stringify({ action: 'bulk_preview', rows }),
+          }),
+    bulkImportStudents: (rows: BulkStudentImportInputRow[]) =>
+      isSupabaseConfigured()
+        ? supabaseApi.admin.bulkImportStudents(rows)
+        : localRequest<{ summary: BulkStudentImportSummary }>('/api/admin/students', {
+            method: 'POST',
+            body: JSON.stringify({ action: 'bulk_import', rows }),
           }),
     updateStaff: (id: string, payload: { role?: UserRole; is_active?: boolean }) =>
       isSupabaseConfigured()

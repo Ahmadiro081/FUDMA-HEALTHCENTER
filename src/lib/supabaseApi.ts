@@ -1,8 +1,12 @@
 import { requireSupabase } from './supabase';
 import type {
   ActivityLog,
+  AdminOverviewStats,
   AppNotification,
   Appointment,
+  BulkStudentImportInputRow,
+  BulkStudentImportSummary,
+  BulkStudentPreviewRow,
   Consultation,
   Department,
   DoctorRecord,
@@ -17,7 +21,9 @@ import type {
   PrescriptionItem,
   StaffAccountSummary,
   StudentAccountSummary,
+  StudentDetailRecord,
   SystemSettings,
+  UpdateStudentPayload,
   UserRole,
 } from '../types/hospital';
 
@@ -899,15 +905,7 @@ export const supabaseApi = {
 
   admin: {
     async overview(): Promise<{
-      stats: {
-        total_patients: number;
-        total_staff: number;
-        total_appointments: number;
-        todays_appointments: number;
-        pending_labs: number;
-        pending_prescriptions: number;
-        low_stock_medications: number;
-      };
+      stats: AdminOverviewStats;
       staff: StaffAccountSummary[];
       students: StudentAccountSummary[];
       departments: Department[];
@@ -935,7 +933,9 @@ export const supabaseApi = {
         client.from('patients').select('id', { count: 'exact', head: true }),
         client
           .from('patients')
-          .select('id, profile_id, hospital_number, matric_or_staff_id, patient_category, faculty_or_unit, blood_group, genotype, is_walk_in, full_name, email, phone, created_at')
+          .select(
+            'id, profile_id, hospital_number, matric_or_staff_id, patient_category, faculty_or_unit, blood_group, genotype, allergies, emergency_contact_name, emergency_contact_phone, is_walk_in, full_name, email, phone, gender, date_of_birth, address, created_at, updated_at'
+          )
           .eq('patient_category', 'Student')
           .order('created_at', { ascending: false }),
         client.from('profiles').select('id, full_name, email, phone, is_active, created_at'),
@@ -1049,9 +1049,14 @@ export const supabaseApi = {
         updated_at: new Date().toISOString(),
       };
 
+      const activeStudentsCount = students.filter((s) => s.is_active).length;
+
       return {
         stats: {
           total_patients: patientsCountRes.count ?? 0,
+          total_students: students.length,
+          active_students: activeStudentsCount,
+          inactive_students: students.length - activeStudentsCount,
           total_staff: staff.length,
           total_appointments: appts.length,
           todays_appointments: appts.filter((a) => a.appointment_date === today).length,
@@ -1067,6 +1072,69 @@ export const supabaseApi = {
       };
     },
 
+    async listStudents(): Promise<{
+      students: StudentAccountSummary[];
+      stats: { total_students: number; active_students: number; inactive_students: number };
+    }> {
+      const client = requireSupabase();
+      const {
+        data: { session },
+      } = await client.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error('Active Super Administrator session required.');
+      }
+
+      const res = await fetch('/api/admin/students', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        students?: StudentAccountSummary[];
+        stats?: { total_students: number; active_students: number; inactive_students: number };
+      };
+      if (!res.ok || !body.students) {
+        throw new Error(body.error || `Unable to load student accounts (${res.status}).`);
+      }
+      return {
+        students: body.students,
+        stats: body.stats || {
+          total_students: body.students.length,
+          active_students: body.students.filter((s) => s.is_active).length,
+          inactive_students: body.students.filter((s) => !s.is_active).length,
+        },
+      };
+    },
+
+    async getStudentDetail(patientId: string): Promise<{ student: StudentDetailRecord }> {
+      const client = requireSupabase();
+      const {
+        data: { session },
+      } = await client.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error('Active Super Administrator session required.');
+      }
+
+      const res = await fetch(`/api/admin/students?patient_id=${encodeURIComponent(patientId)}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        student?: StudentDetailRecord;
+      };
+      if (!res.ok || !body.student) {
+        throw new Error(body.error || `Unable to load student details (${res.status}).`);
+      }
+      return { student: body.student };
+    },
+
     async createStudent(payload: Record<string, unknown>): Promise<{ ok: boolean; student: StudentAccountSummary }> {
       const client = requireSupabase();
       const {
@@ -1074,7 +1142,7 @@ export const supabaseApi = {
       } = await client.auth.getSession();
 
       if (!session?.access_token) {
-        throw new Error('Active administrator session required to provision student accounts.');
+        throw new Error('Active Super Administrator session required to provision student accounts.');
       }
 
       const res = await fetch('/api/admin/students', {
@@ -1096,6 +1164,35 @@ export const supabaseApi = {
       return { ok: true, student: body.student };
     },
 
+    async updateStudent(payload: UpdateStudentPayload): Promise<{ ok: boolean; student: StudentAccountSummary }> {
+      const client = requireSupabase();
+      const {
+        data: { session },
+      } = await client.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error('Active Super Administrator session required to update student accounts.');
+      }
+
+      const res = await fetch('/api/admin/students', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        ok?: boolean;
+        student?: StudentAccountSummary;
+      };
+      if (!res.ok || !body.student) {
+        throw new Error(body.error || `Failed to update student profile (${res.status}).`);
+      }
+      return { ok: true, student: body.student };
+    },
+
     async updateStudentStatus(userId: string, isActive: boolean): Promise<{ ok: boolean }> {
       const client = requireSupabase();
       const {
@@ -1103,7 +1200,7 @@ export const supabaseApi = {
       } = await client.auth.getSession();
 
       if (!session?.access_token) {
-        throw new Error('Active administrator session required.');
+        throw new Error('Active Super Administrator session required.');
       }
 
       const res = await fetch('/api/admin/students', {
@@ -1119,6 +1216,62 @@ export const supabaseApi = {
         throw new Error(body.error || `Failed to update student account status (${res.status}).`);
       }
       return { ok: true };
+    },
+
+    async bulkPreviewStudents(rows: BulkStudentImportInputRow[]): Promise<{ rows: BulkStudentPreviewRow[] }> {
+      const client = requireSupabase();
+      const {
+        data: { session },
+      } = await client.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error('Active Super Administrator session required.');
+      }
+
+      const res = await fetch('/api/admin/students', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ action: 'bulk_preview', rows }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        rows?: BulkStudentPreviewRow[];
+      };
+      if (!res.ok || !body.rows) {
+        throw new Error(body.error || `Unable to validate bulk student upload (${res.status}).`);
+      }
+      return { rows: body.rows };
+    },
+
+    async bulkImportStudents(rows: BulkStudentImportInputRow[]): Promise<{ summary: BulkStudentImportSummary }> {
+      const client = requireSupabase();
+      const {
+        data: { session },
+      } = await client.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error('Active Super Administrator session required.');
+      }
+
+      const res = await fetch('/api/admin/students', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ action: 'bulk_import', rows }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        summary?: BulkStudentImportSummary;
+      };
+      if (!res.ok || !body.summary) {
+        throw new Error(body.error || `Bulk student import failed (${res.status}).`);
+      }
+      return { summary: body.summary };
     },
 
     async createStaff(payload: Record<string, unknown>): Promise<{ ok: boolean }> {

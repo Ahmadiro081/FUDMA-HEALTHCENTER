@@ -12,6 +12,7 @@ import { NursingDashboard } from './pages/NursingDashboard';
 import { PatientDashboard } from './pages/PatientDashboard';
 import { PharmacyDashboard } from './pages/PharmacyDashboard';
 import { SetupSuperAdminPage } from './pages/SetupSuperAdminPage';
+import { StudentManagementPage } from './pages/StudentManagementPage';
 
 export default function App() {
   return (
@@ -71,6 +72,14 @@ export default function App() {
               element={
                 <ProtectedRoute allowedRoles={['admin', 'super_admin']}>
                   <AdminDashboard />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/portal/admin/student-management"
+              element={
+                <ProtectedRoute allowedRoles={['super_admin']}>
+                  <StudentManagementPage />
                 </ProtectedRoute>
               }
             />

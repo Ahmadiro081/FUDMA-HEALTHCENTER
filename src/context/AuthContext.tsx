@@ -145,7 +145,7 @@ async function hydrateSupabaseUser(activeSession: Session): Promise<AuthUser | n
     date_of_birth: profile?.date_of_birth ?? null,
     address: profile?.address ?? null,
     role: resolvedRole,
-    is_active: profile?.is_active ?? true,
+    is_active: profile ? Boolean(profile.is_active) : false,
     patient,
     doctor,
   };
@@ -294,6 +294,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       setStoredToken(null);
       if (event === 'TOKEN_REFRESHED') {
+        void sb
+          .from('profiles')
+          .select('is_active')
+          .eq('id', nextSession.user.id)
+          .maybeSingle()
+          .then(async ({ data: profData, error: profErr }) => {
+            if (!mounted) return;
+            if (profErr || !profData || profData.is_active === false) {
+              await sb.auth.signOut();
+              setSession(null);
+              setUser(null);
+            }
+          });
         return;
       }
 
@@ -321,6 +334,58 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       subscription.unsubscribe();
     };
   }, [useSupabase, refreshUser]);
+
+  // Actively revoke deactivated user sessions during live portal use
+  useEffect(() => {
+    if (!useSupabase || !supabase || !session?.user?.id) {
+      return;
+    }
+
+    let cancelled = false;
+    const sb = supabase;
+    const currentUserId = session.user.id;
+
+    const verifyActiveAccount = async () => {
+      try {
+        const { data, error } = await sb
+          .from('profiles')
+          .select('is_active')
+          .eq('id', currentUserId)
+          .maybeSingle();
+
+        if (cancelled) return;
+        if (!error && data && data.is_active === false) {
+          await sb.auth.signOut();
+          setSession(null);
+          setStoredToken(null);
+          setRecoveryMode(false);
+          setUser(null);
+        }
+      } catch {
+        // Ignore transient network errors during background active-status check
+      }
+    };
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        void verifyActiveAccount();
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void verifyActiveAccount();
+    }, 20000);
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [useSupabase, session?.user?.id]);
 
   const verifyMatric = useCallback(
     async (matricNumber: string): Promise<MatricVerificationResult> => {

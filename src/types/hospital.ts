@@ -338,11 +338,50 @@ export interface StudentAccountSummary {
   email: string | null;
   department: string | null;
   phone: string | null;
+  gender?: 'Male' | 'Female' | 'Other' | null;
+  date_of_birth?: string | null;
+  address?: string | null;
   blood_group: string | null;
   genotype: string | null;
+  allergies?: string | null;
+  emergency_contact_name?: string | null;
+  emergency_contact_phone?: string | null;
   is_active: boolean;
   is_walk_in: boolean;
+  is_whitelisted?: boolean;
+  has_auth_account?: boolean;
   created_at: string;
+  updated_at?: string;
+}
+
+export interface StudentDetailRecord extends StudentAccountSummary {
+  clinical_summary: {
+    appointments_count: number;
+    vitals_count: number;
+    consultations_count: number;
+    lab_requests_count: number;
+    prescriptions_count: number;
+  };
+  recent_appointments: Array<{
+    id: string;
+    appointment_code: string;
+    consultation_category: string;
+    appointment_date: string;
+    appointment_time: string;
+    status: AppointmentStatus;
+  }>;
+  recent_consultations: Array<{
+    id: string;
+    diagnosis: string;
+    status: string;
+    created_at: string;
+  }>;
+  recent_prescriptions: Array<{
+    id: string;
+    prescription_code: string;
+    status: PrescriptionStatus;
+    created_at: string;
+  }>;
 }
 
 export interface CreateStudentPayload {
@@ -353,8 +392,102 @@ export interface CreateStudentPayload {
   password: string;
   phone?: string;
   gender?: 'Male' | 'Female' | 'Other' | '';
+  date_of_birth?: string;
+  address?: string;
   blood_group?: string;
   genotype?: string;
   allergies?: string;
+  emergency_contact_name?: string;
+  emergency_contact_phone?: string;
+}
+
+export interface UpdateStudentPayload {
+  patient_id: string;
+  full_name: string;
+  matric_number: string;
+  department: string;
+  email: string;
+  phone?: string | null;
+  gender?: 'Male' | 'Female' | 'Other' | '' | null;
+  date_of_birth?: string | null;
+  address?: string | null;
+  blood_group?: string | null;
+  genotype?: string | null;
+  allergies?: string | null;
+  emergency_contact_name?: string | null;
+  emergency_contact_phone?: string | null;
+}
+
+export interface BulkStudentImportInputRow {
+  row_number: number;
+  full_name: string;
+  matric_number: string;
+  department: string;
+  email: string;
+  password?: string;
+  phone?: string;
+  gender?: string;
+  date_of_birth?: string;
+  address?: string;
+  blood_group?: string;
+  genotype?: string;
+  allergies?: string;
+  emergency_contact_name?: string;
+  emergency_contact_phone?: string;
+}
+
+export interface BulkStudentPreviewRow {
+  row_number: number;
+  status: 'valid' | 'duplicate' | 'invalid';
+  errors: string[];
+  normalized: {
+    full_name: string;
+    matric_number: string;
+    department: string;
+    email: string;
+    has_custom_password: boolean;
+    phone: string | null;
+    gender: 'Male' | 'Female' | 'Other' | null;
+    date_of_birth: string | null;
+    address: string | null;
+    blood_group: string;
+    genotype: string;
+    allergies: string;
+    emergency_contact_name: string | null;
+    emergency_contact_phone: string | null;
+  };
+}
+
+export interface BulkStudentImportRowResult {
+  row_number: number;
+  full_name: string;
+  matric_number: string;
+  email: string;
+  department: string;
+  status: 'created' | 'skipped_duplicate' | 'failed';
+  message: string;
+  hospital_number?: string;
+  generated_password?: string;
+}
+
+export interface BulkStudentImportSummary {
+  total: number;
+  created: number;
+  skipped_duplicate: number;
+  failed: number;
+  results: BulkStudentImportRowResult[];
+}
+
+export interface AdminOverviewStats {
+  total_patients: number;
+  total_students: number;
+  active_students: number;
+  inactive_students: number;
+  total_staff: number;
+  total_appointments: number;
+  todays_appointments: number;
+  pending_labs: number;
+  pending_prescriptions: number;
+  low_stock_medications: number;
 }
 
