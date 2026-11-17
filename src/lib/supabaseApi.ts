@@ -905,6 +905,7 @@ export const supabaseApi = {
         medsRes,
         logsRes,
         settingsRes,
+        privRes,
       ] = await Promise.all([
         client.from('patients').select('id', { count: 'exact', head: true }),
         client.from('profiles').select('id, full_name, email, phone, is_active, created_at'),
@@ -923,6 +924,7 @@ export const supabaseApi = {
         client.from('medications').select('stock_quantity, reorder_level'),
         client.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(100),
         client.from('system_settings').select('*').limit(1).maybeSingle(),
+        client.from('privileged_accounts').select('user_id, login_username'),
       ]);
 
       const firstError =
@@ -946,6 +948,12 @@ export const supabaseApi = {
       const deptMap = new Map(departments.map((d) => [d.id, d.name]));
       const roleMap = new Map((rolesRes.data || []).map((r) => [String(r.user_id), r.role as UserRole]));
       const docMap = new Map((doctorsRes.data || []).map((d) => [String(d.profile_id), d]));
+      const privMap = new Map(
+        (!privRes.error && Array.isArray(privRes.data) ? privRes.data : []).map((pr) => [
+          String(pr.user_id),
+          String(pr.login_username),
+        ])
+      );
 
       const staff: StaffAccountSummary[] = (profilesRes.data || [])
         .map((p) => {
@@ -959,6 +967,7 @@ export const supabaseApi = {
             phone: strOrNull(p.phone),
             role,
             is_active: Boolean(p.is_active),
+            login_username: privMap.get(String(p.id)) || null,
             department_id: doc ? strOrNull(doc.department_id) : null,
             department_name: doc?.department_id ? deptMap.get(String(doc.department_id)) || null : null,
             specialization: doc ? strOrNull(doc.specialization) : null,

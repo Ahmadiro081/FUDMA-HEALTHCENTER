@@ -461,6 +461,11 @@ export function AdminDashboard() {
                         <tr key={member.id} className="hover:bg-slate-50/70">
                           <td className="py-3 px-4">
                             <p className="font-semibold text-slate-900">{member.full_name}</p>
+                            {member.login_username && (
+                              <p className="text-xs font-mono text-slate-600">
+                                Privileged ID: {member.login_username}
+                              </p>
+                            )}
                             {member.specialization && (
                               <p className="text-xs text-slate-500">
                                 {member.specialization} · {member.consultation_room}

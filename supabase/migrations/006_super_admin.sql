@@ -35,6 +35,27 @@ ALTER TABLE public.user_roles
   ADD CONSTRAINT user_roles_role_check
   CHECK (role IN ('patient', 'nurse', 'lab', 'pharmacy', 'doctor', 'admin', 'super_admin'));
 
+-- 1b. Expand notifications.recipient_role CHECK constraint to include 'super_admin'
+DO $$
+DECLARE
+  v_con RECORD;
+BEGIN
+  FOR v_con IN
+    SELECT conname
+    FROM pg_constraint
+    WHERE conrelid = 'public.notifications'::regclass
+      AND contype = 'c'
+      AND pg_get_constraintdef(oid) ILIKE '%recipient_role%'
+  LOOP
+    EXECUTE format('ALTER TABLE public.notifications DROP CONSTRAINT %I', v_con.conname);
+  END LOOP;
+END;
+$$;
+
+ALTER TABLE public.notifications
+  ADD CONSTRAINT notifications_recipient_role_check
+  CHECK (recipient_role IN ('patient', 'nurse', 'lab', 'pharmacy', 'doctor', 'admin', 'super_admin'));
+
 -- 2. Privileged Administrative Account Registry (separate from Group 11 whitelist)
 CREATE TABLE IF NOT EXISTS public.privileged_accounts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -263,8 +284,90 @@ CREATE TRIGGER trg_protect_profiles
   BEFORE UPDATE OR DELETE ON public.profiles
   FOR EACH ROW EXECUTE FUNCTION public.trg_fn_protect_profiles();
 
+-- 6b. Update Step-1 matriculation verification RPC so ENG/2012/0001 is explicitly
+--     recognised as the designated Initial Super Administrator identity and exempted
+--     from Group 11 patient whitelist self-registration without auto-creating any account.
+CREATE OR REPLACE FUNCTION public.rpc_verify_group11_matric(p_matric_number TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_norm TEXT;
+  v_wl RECORD;
+  v_is_provisioned BOOLEAN;
+BEGIN
+  v_norm := public.normalize_matric_number(p_matric_number);
+
+  IF v_norm = '' OR v_norm !~ '^[A-Z0-9]+/[0-9]{4}/[0-9]+$' THEN
+    RETURN jsonb_build_object(
+      'ok', FALSE,
+      'code', 'INVALID_FORMAT',
+      'message', 'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.'
+    );
+  END IF;
+
+  IF v_norm = 'ENG/2012/0001' OR EXISTS (
+    SELECT 1 FROM public.privileged_accounts
+    WHERE public.normalize_matric_number(login_username) = v_norm
+  ) THEN
+    SELECT EXISTS (
+      SELECT 1 FROM public.privileged_accounts
+      WHERE public.normalize_matric_number(login_username) = v_norm
+    ) INTO v_is_provisioned;
+
+    RETURN jsonb_build_object(
+      'ok', FALSE,
+      'code', 'PRIVILEGED_SUPER_ADMIN',
+      'matric_number', v_norm,
+      'is_provisioned', v_is_provisioned,
+      'message', CASE
+        WHEN v_is_provisioned THEN
+          'ENG/2012/0001 is the designated Initial Super Administrator identity and is exempt from Group 11 patient registration. Please sign in through Portal Sign In with your provisioned credentials.'
+        ELSE
+          'ENG/2012/0001 is the designated Initial Super Administrator identity and is exempt from Group 11 patient self-registration. This account cannot be auto-created here; complete secure server-side administrator provisioning first, then sign in via Portal Sign In.'
+      END
+    );
+  END IF;
+
+  SELECT full_name, matric_number, department, is_registered, registered_user_id
+  INTO v_wl
+  FROM public.group11_student_whitelist
+  WHERE public.normalize_matric_number(matric_number) = v_norm
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'ok', FALSE,
+      'code', 'NOT_FOUND',
+      'message', 'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.'
+    );
+  END IF;
+
+  IF v_wl.is_registered = TRUE OR v_wl.registered_user_id IS NOT NULL THEN
+    RETURN jsonb_build_object(
+      'ok', FALSE,
+      'code', 'ALREADY_REGISTERED',
+      'message', 'This matriculation number has already been registered. Please sign in with your matriculation number and password.'
+    );
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok', TRUE,
+    'code', 'VERIFIED',
+    'full_name', v_wl.full_name,
+    'matric_number', v_wl.matric_number,
+    'department', v_wl.department
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_verify_group11_matric(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.rpc_verify_group11_matric(TEXT) TO anon, authenticated;
+
 -- 7. Update handle_new_user() trigger to support server-only 'super_admin_provision' origin
---    while continuing strict Group 11 enforcement on all public signups (including ENG/2012/0001).
+--    while continuing strict Group 11 enforcement on all public signups (explicitly blocking ENG/2012/0001).
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -303,6 +406,12 @@ BEGIN
   v_address := NULLIF(TRIM(NEW.raw_user_meta_data->>'address'), '');
 
   IF v_account_origin IN ('admin_staff', 'super_admin_provision') THEN
+    IF v_account_origin = 'super_admin_provision' AND EXISTS (
+      SELECT 1 FROM public.user_roles WHERE role = 'super_admin'
+    ) THEN
+      RAISE EXCEPTION 'Initial Super Administrator has already been provisioned and cannot be duplicated.';
+    END IF;
+
     v_full_name := COALESCE(NULLIF(TRIM(NEW.raw_user_meta_data->>'full_name'), ''), split_part(NEW.email, '@', 1));
 
     INSERT INTO public.profiles (id, full_name, email, phone, gender, date_of_birth, address)
@@ -323,6 +432,13 @@ BEGIN
   v_norm_matric := public.normalize_matric_number(NEW.raw_user_meta_data->>'matric_or_staff_id');
   IF v_norm_matric = '' THEN
     RAISE EXCEPTION 'Access Denied. Your matriculation number is not authorised for Group 11 registration. Please contact your project administrator.';
+  END IF;
+
+  IF v_norm_matric = 'ENG/2012/0001' OR EXISTS (
+    SELECT 1 FROM public.privileged_accounts
+    WHERE public.normalize_matric_number(login_username) = v_norm_matric
+  ) THEN
+    RAISE EXCEPTION 'Access Denied. % is the designated Super Administrator identity and cannot be registered as a public patient account.', v_norm_matric;
   END IF;
 
   SELECT *

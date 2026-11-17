@@ -316,10 +316,16 @@ export interface StaffAccountSummary {
 
 export interface MatricVerificationResult {
   ok: boolean;
-  code: 'VERIFIED' | 'NOT_FOUND' | 'ALREADY_REGISTERED' | 'INVALID_FORMAT';
+  code:
+    | 'VERIFIED'
+    | 'NOT_FOUND'
+    | 'ALREADY_REGISTERED'
+    | 'INVALID_FORMAT'
+    | 'PRIVILEGED_SUPER_ADMIN';
   message?: string;
   full_name?: string;
   matric_number?: string;
   department?: string;
+  is_provisioned?: boolean;
 }
 

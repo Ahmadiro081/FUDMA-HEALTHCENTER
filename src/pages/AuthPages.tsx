@@ -371,6 +371,7 @@ export function RegisterPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [verificationNotice, setVerificationNotice] = useState('');
+  const [superAdminNotice, setSuperAdminNotice] = useState('');
 
   const handleChange = (field: string, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -380,6 +381,7 @@ export function RegisterPage() {
     e.preventDefault();
     setError('');
     setVerificationNotice('');
+    setSuperAdminNotice('');
     const candidate = matricInput.trim().replace(/\s+/g, '').toUpperCase();
     if (!candidate) {
       setError('Please enter your matriculation number to verify eligibility.');
@@ -389,6 +391,15 @@ export function RegisterPage() {
     setVerifying(true);
     try {
       const result = await verifyMatric(candidate);
+      if (result.code === 'PRIVILEGED_SUPER_ADMIN') {
+        setVerifiedStudent(null);
+        setSuperAdminNotice(
+          result.message ||
+            'ENG/2012/0001 is the designated Initial Super Administrator identity and is exempt from Group 11 patient registration. Complete secure server-side provisioning, then sign in via Portal Sign In.'
+        );
+        return;
+      }
+
       if (!result.ok || !result.full_name || !result.matric_number || !result.department) {
         setVerifiedStudent(null);
         setError(
@@ -421,6 +432,7 @@ export function RegisterPage() {
     setVerifiedStudent(null);
     setError('');
     setVerificationNotice('');
+    setSuperAdminNotice('');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -570,6 +582,29 @@ export function RegisterPage() {
             </div>
           )}
 
+          {superAdminNotice && (
+            <div className="mt-4 rounded-lg border border-slate-300 bg-slate-900 px-4 py-3 text-xs text-slate-100 space-y-2">
+              <div className="flex items-start gap-2.5">
+                <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-semibold text-white">
+                    Designated Super Administrator Identity Recognised
+                  </p>
+                  <p className="text-slate-200 leading-relaxed">{superAdminNotice}</p>
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <Link
+                  to="/login"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-slate-100 transition-colors"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Go to Portal Sign In</span>
+                </Link>
+              </div>
+            </div>
+          )}
+
           {error && (
             <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 flex items-start gap-2 text-xs font-medium text-red-800">
               <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
@@ -588,7 +623,10 @@ export function RegisterPage() {
                   type="text"
                   required
                   value={matricInput}
-                  onChange={(e) => setMatricInput(e.target.value.toUpperCase())}
+                  onChange={(e) => {
+                    setMatricInput(e.target.value.toUpperCase());
+                    if (superAdminNotice) setSuperAdminNotice('');
+                  }}
                   placeholder="e.g., ENG/2024/XXXXX"
                   className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm font-mono uppercase text-slate-900 placeholder:text-slate-400 placeholder:normal-case focus:border-[#0369A1] focus:outline-none"
                 />

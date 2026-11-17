@@ -429,6 +429,27 @@ async function startServer(): Promise<void> {
     }
 
     const db = loadDb();
+    const isPrivilegedSuperAdmin =
+      normMatric === SUPER_ADMIN_USERNAME ||
+      db.privileged_accounts.some(
+        (entry) => normalizeMatricNumber(entry.login_username) === normMatric
+      );
+    if (isPrivilegedSuperAdmin) {
+      const isProvisioned = db.privileged_accounts.some(
+        (entry) => normalizeMatricNumber(entry.login_username) === normMatric
+      );
+      res.json({
+        ok: false,
+        code: 'PRIVILEGED_SUPER_ADMIN',
+        matric_number: normMatric,
+        is_provisioned: isProvisioned,
+        message: isProvisioned
+          ? `${SUPER_ADMIN_USERNAME} is the designated Initial Super Administrator identity and is exempt from Group 11 patient registration. Please sign in through Portal Sign In with your provisioned credentials.`
+          : `${SUPER_ADMIN_USERNAME} is the designated Initial Super Administrator identity and is exempt from Group 11 patient self-registration. This account cannot be auto-created here; complete secure server-side administrator provisioning first, then sign in via Portal Sign In.`,
+      });
+      return;
+    }
+
     const wl = db.group11_student_whitelist.find(
       (entry) => normalizeMatricNumber(entry.matric_number) === normMatric
     );
@@ -494,6 +515,18 @@ async function startServer(): Promise<void> {
     }
 
     const db = loadDb();
+    if (
+      normMatric === SUPER_ADMIN_USERNAME ||
+      db.privileged_accounts.some(
+        (entry) => normalizeMatricNumber(entry.login_username) === normMatric
+      )
+    ) {
+      res.status(403).json({
+        error: `${normMatric} is the designated Super Administrator identity and cannot be registered as a public patient account.`,
+      });
+      return;
+    }
+
     const wl = db.group11_student_whitelist.find(
       (entry) => normalizeMatricNumber(entry.matric_number) === normMatric
     );
@@ -646,6 +679,12 @@ async function startServer(): Promise<void> {
       if (priv) {
         user = db.users.find((u) => u.id === priv.user_id && u.role === 'super_admin');
         matchedPrivilegedUsername = priv.login_username;
+      } else if (normMatric === SUPER_ADMIN_USERNAME) {
+        res.status(403).json({
+          error:
+            'Initial Super Administrator (ENG/2012/0001) has not been provisioned yet. Complete secure server-side provisioning before signing in.',
+        });
+        return;
       } else {
         const wl = db.group11_student_whitelist.find(
           (entry) => normalizeMatricNumber(entry.matric_number) === normMatric

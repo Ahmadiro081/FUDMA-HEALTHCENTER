@@ -77,7 +77,10 @@ async function hydrateSupabaseUser(activeSession: Session): Promise<AuthUser | n
   ]);
 
   const profile = profileSettled.status === 'fulfilled' ? profileSettled.value.data : null;
-  const roleData = roleSettled.status === 'fulfilled' ? roleSettled.value.data : null;
+  if (roleSettled.status === 'rejected' || roleSettled.value.error) {
+    throw new Error('Unable to verify assigned account role from database.');
+  }
+  const roleData = roleSettled.value.data;
   const patientData = patientSettled.status === 'fulfilled' ? patientSettled.value.data : null;
   const doctorData = doctorSettled.status === 'fulfilled' ? doctorSettled.value.data : null;
 
@@ -421,6 +424,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .toUpperCase();
       if (!normalizedMatric) {
         throw new Error('Please verify your Group 11 matriculation number before creating an account.');
+      }
+      if (normalizedMatric === 'ENG/2012/0001') {
+        throw new Error(
+          'ENG/2012/0001 is the designated Initial Super Administrator identity and cannot be registered as a public patient account.'
+        );
       }
 
       if (useSupabase && supabase) {
