@@ -6,7 +6,7 @@ export const SUPER_ADMIN_USERNAME = 'ENG/2012/0001';
 export const SUPER_ADMIN_ACCOUNT_TYPE = 'Privileged Administrative Account';
 export const SUPER_ADMIN_ROLE = 'super_admin' as const;
 export const DESIGNATED_SUPER_ADMIN_EMAIL = (
-  process.env.DESIGNATED_SUPER_ADMIN_EMAIL || 'newtonahmad091@gmail.com'
+  process.env.DESIGNATED_SUPER_ADMIN_EMAIL || 'ahmadcybro@gmail.com'
 )
   .trim()
   .toLowerCase();

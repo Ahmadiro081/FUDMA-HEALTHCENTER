@@ -357,7 +357,7 @@ export function RegisterPage() {
 
   const [superAdminForm, setSuperAdminForm] = useState({
     full_name: 'Ahmad Ibrahim',
-    email: 'newtonahmad091@gmail.com',
+    email: 'ahmadcybro@gmail.com',
     password: '',
     confirm_password: '',
   });
@@ -770,7 +770,7 @@ export function RegisterPage() {
                     required
                     value={superAdminForm.email}
                     onChange={(e) => handleSuperAdminChange('email', e.target.value)}
-                    placeholder="newtonahmad091@gmail.com"
+                    placeholder="ahmadcybro@gmail.com"
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
                   />
                 </div>
