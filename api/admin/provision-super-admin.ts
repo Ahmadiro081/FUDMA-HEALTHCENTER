@@ -326,6 +326,34 @@ export async function executeSupabaseSuperAdminProvision(
     };
   }
 
+  // 1b. Check Supabase Auth directly for any pre-existing or orphaned auth.users row with this email
+  try {
+    let page = 1;
+    const perPage = 200;
+    while (page <= 10) {
+      const { data: listData, error: listErr } = await supabaseAdmin.auth.admin.listUsers({
+        page,
+        perPage,
+      });
+      if (listErr || !listData?.users?.length) break;
+      const conflictUser = listData.users.find(
+        (u) => (u.email || '').trim().toLowerCase() === email
+      );
+      if (conflictUser) {
+        return {
+          status: 409,
+          payload: {
+            error: `An authentication record for ${email} already exists in Supabase Auth (User ID: ${conflictUser.id}). Remove that conflicting user in Supabase Dashboard → Authentication → Users if it is an incomplete setup, then retry.`,
+          },
+        };
+      }
+      if (listData.users.length < perPage) break;
+      page += 1;
+    }
+  } catch {
+    // Proceed to createUser if listUsers is unavailable
+  }
+
   // 2. Create Supabase Auth user with 'admin_staff' initial origin so handle_new_user()
   //    never trips role-protection triggers inside GoTrue's transaction across migrations 005..008.
   //    Privileged role ('super_admin'), app_metadata, and privileged_accounts are assigned immediately below via service_role.
@@ -348,11 +376,23 @@ export async function executeSupabaseSuperAdminProvision(
     const msg = createErr?.message || 'Failed to create Super Admin in Supabase Auth.';
     const lower = msg.toLowerCase();
     const status = lower.includes('already') || lower.includes('exists') ? 409 : 400;
-    const diagnostic =
-      lower.includes('database error')
-        ? `${msg}. Run supabase/migrations/008_fix_super_admin_provisioning.sql in your Supabase SQL Editor and ensure no conflicting profile or auth record exists for ${email}.`
-        : msg;
-    return { status, payload: { error: diagnostic } };
+    if (lower.includes('database error')) {
+      const { data: verifyProbe } = await supabaseAdmin.rpc('rpc_verify_group11_matric', {
+        p_matric_number: SUPER_ADMIN_USERNAME,
+      });
+      const probeObj = (verifyProbe || {}) as { code?: string };
+      const migrationHint =
+        probeObj.code !== 'PRIVILEGED_SUPER_ADMIN'
+          ? 'Supabase database migrations 006_super_admin.sql and 008_fix_super_admin_provisioning.sql have NOT been executed on this Supabase project yet.'
+          : 'Run supabase/migrations/008_fix_super_admin_provisioning.sql in your Supabase SQL Editor and check Supabase Dashboard → Logs → Auth/Postgres Logs for the exact trigger error.';
+      return {
+        status,
+        payload: {
+          error: `${msg}. ${migrationHint}`,
+        },
+      };
+    }
+    return { status, payload: { error: msg } };
   }
 
   const createdUserId = createdAuth.user.id;

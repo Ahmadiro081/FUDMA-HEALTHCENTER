@@ -2,15 +2,23 @@
 -- FUDMA HEALTHCENTER: Super Admin Provisioning & Trigger Repair Migration
 -- Migration: 008_fix_super_admin_provisioning.sql
 -- Purpose:
---   1. Idempotently repair user_roles & notifications CHECK constraints to allow 'super_admin'
+--   1. Idempotently ensure normalize_matric_number, user_roles & notifications
+--      CHECK constraints, and privileged_accounts registry exist cleanly
 --   2. Ensure public.is_service_context() stays SECURITY INVOKER (never SECURITY DEFINER)
---   3. Make public.handle_new_user() resilient during GoTrue auth.admin.createUser()
---      for 'admin_staff', 'admin_student', and 'super_admin_provision' origins without
---      triggering role-escalation blocks inside GoTrue's transaction
---   4. Preserve strict Group 11 enforcement on all public signups and full Super Admin
---      immutability via trg_protect_user_roles / trg_protect_profiles / trg_protect_privileged_accounts
+--   3. Repair public.handle_new_user() and protection triggers so GoTrue
+--      auth.admin.createUser() succeeds cleanly without trigger blocks
+--   4. Output diagnostic status at the end when executed in Supabase SQL Editor
 -- Safe & idempotent to run after 001..007 migrations.
 -- =============================================================================
+
+-- 0. Ensure canonical matriculation number normalizer exists
+CREATE OR REPLACE FUNCTION public.normalize_matric_number(p_input TEXT)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT UPPER(REGEXP_REPLACE(TRIM(COALESCE(p_input, '')), '\s+', '', 'g'));
+$$;
 
 -- 1. Ensure user_roles allows 'super_admin' & single super_admin uniqueness
 DO $$
@@ -68,10 +76,102 @@ AS $$
       OR current_user IN ('postgres', 'supabase_admin');
 $$;
 
--- 4. Repair handle_new_user() so server-side Admin API provisioning never fails inside GoTrue
---    Note: When account_origin = 'super_admin_provision', handle_new_user initializes 'patient'
---    safely if called directly from GoTrue, or 'super_admin' when in service context; the API
---    handler /api/admin/provision-super-admin immediately assigns 'super_admin' via service_role.
+-- 4. Ensure privileged_accounts table & immutability helpers exist
+CREATE TABLE IF NOT EXISTS public.privileged_accounts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE RESTRICT,
+  login_username TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('super_admin')),
+  account_type TEXT NOT NULL DEFAULT 'Privileged Administrative Account',
+  is_immutable BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT chk_privileged_username_normalized
+    CHECK (login_username = public.normalize_matric_number(login_username) AND LENGTH(login_username) > 0)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_privileged_accounts_norm_username
+  ON public.privileged_accounts (public.normalize_matric_number(login_username));
+
+ALTER TABLE public.privileged_accounts ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Only super_admin reads privileged accounts" ON public.privileged_accounts;
+CREATE POLICY "Only super_admin reads privileged accounts"
+  ON public.privileged_accounts FOR SELECT
+  USING (public.get_my_role() = 'super_admin');
+
+CREATE OR REPLACE FUNCTION public.is_super_admin()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(public.get_my_role(), '') = 'super_admin';
+$$;
+
+-- 5. Ensure user_roles protection trigger allows server-side service_role and initial 'patient' inserts
+CREATE OR REPLACE FUNCTION public.trg_fn_protect_user_roles()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_is_svc BOOLEAN := public.is_service_context();
+  v_is_super BOOLEAN := public.is_super_admin();
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.role = 'super_admin' OR EXISTS (
+      SELECT 1 FROM public.privileged_accounts WHERE user_id = OLD.user_id
+    ) THEN
+      RAISE EXCEPTION 'The Super Admin account cannot be stripped of privileges or deleted.';
+    END IF;
+    IF NOT v_is_svc AND OLD.role = 'admin' AND NOT v_is_super THEN
+      RAISE EXCEPTION 'Only the Super Administrator may revoke administrator roles.';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.role = 'super_admin' AND NOT v_is_svc THEN
+      RAISE EXCEPTION 'Super Admin accounts can only be provisioned via the secure server-side process.';
+    END IF;
+    IF NEW.role = 'admin' AND NOT v_is_svc AND NOT v_is_super THEN
+      RAISE EXCEPTION 'Only the Super Administrator may assign administrator roles.';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.role = 'super_admin' OR EXISTS (
+      SELECT 1 FROM public.privileged_accounts WHERE user_id = OLD.user_id
+    ) THEN
+      IF NEW.role IS DISTINCT FROM OLD.role OR NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+        RAISE EXCEPTION 'The Super Admin account is protected and cannot be demoted or reassigned.';
+      END IF;
+      RETURN NEW;
+    END IF;
+
+    IF NEW.role = 'super_admin' AND NOT v_is_svc THEN
+      RAISE EXCEPTION 'Super Admin privilege escalation is strictly prohibited.';
+    END IF;
+
+    IF (OLD.role = 'admin' OR NEW.role = 'admin') AND NOT v_is_svc AND NOT v_is_super THEN
+      RAISE EXCEPTION 'Only the Super Administrator may assign or modify administrator roles.';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_user_roles ON public.user_roles;
+CREATE TRIGGER trg_protect_user_roles
+  BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles
+  FOR EACH ROW EXECUTE FUNCTION public.trg_fn_protect_user_roles();
+
+-- 6. Repair handle_new_user() so server-side Admin API provisioning never fails inside GoTrue
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -248,3 +348,16 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- 7. Diagnostic verification summary (displayed in Supabase SQL Editor)
+SELECT
+  (SELECT COUNT(*) FROM auth.users WHERE LOWER(email) = 'ahmadcybro@gmail.com') AS auth_users_for_email,
+  (SELECT COUNT(*) FROM public.profiles WHERE LOWER(email) = 'ahmadcybro@gmail.com') AS profiles_for_email,
+  (SELECT COUNT(*) FROM public.user_roles WHERE role = 'super_admin') AS super_admin_roles,
+  (SELECT COUNT(*) FROM public.privileged_accounts) AS privileged_accounts,
+  (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE proname = 'handle_new_user' AND pronamespace = 'public'::regnamespace) AS handle_new_user_owner,
+  (SELECT string_agg(t.tgname, ', ')
+   FROM pg_trigger t
+   JOIN pg_class c ON c.oid = t.tgrelid
+   JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'auth' AND c.relname = 'users' AND NOT t.tgisinternal) AS auth_users_triggers;
