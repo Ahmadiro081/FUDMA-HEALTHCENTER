@@ -92,7 +92,7 @@ async function main(): Promise<void> {
 
   let password = process.env.SUPER_ADMIN_PASSWORD || '';
   if (!password) {
-    password = await promptLine('Enter private Super Admin password (min 12 chars): ', true);
+    password = await promptLine('Enter private Super Admin password (min 8 chars): ', true);
     const confirm = await promptLine('Confirm private Super Admin password: ', true);
     if (password !== confirm) {
       console.error('ERROR: Passwords do not match.');

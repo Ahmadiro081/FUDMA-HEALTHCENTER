@@ -35,6 +35,10 @@ ALTER TABLE public.user_roles
   ADD CONSTRAINT user_roles_role_check
   CHECK (role IN ('patient', 'nurse', 'lab', 'pharmacy', 'doctor', 'admin', 'super_admin'));
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_roles_single_super_admin
+  ON public.user_roles (role)
+  WHERE role = 'super_admin';
+
 -- 1b. Expand notifications.recipient_role CHECK constraint to include 'super_admin'
 DO $$
 DECLARE
@@ -312,9 +316,15 @@ BEGIN
     SELECT 1 FROM public.privileged_accounts
     WHERE public.normalize_matric_number(login_username) = v_norm
   ) THEN
-    SELECT EXISTS (
-      SELECT 1 FROM public.privileged_accounts
-      WHERE public.normalize_matric_number(login_username) = v_norm
+    SELECT (
+      EXISTS (
+        SELECT 1 FROM public.privileged_accounts
+        WHERE public.normalize_matric_number(login_username) = v_norm
+      )
+      OR EXISTS (
+        SELECT 1 FROM public.user_roles
+        WHERE role = 'super_admin'
+      )
     ) INTO v_is_provisioned;
 
     RETURN jsonb_build_object(
@@ -324,9 +334,9 @@ BEGIN
       'is_provisioned', v_is_provisioned,
       'message', CASE
         WHEN v_is_provisioned THEN
-          'ENG/2012/0001 is the designated Initial Super Administrator identity and is exempt from Group 11 patient registration. Please sign in through Portal Sign In with your provisioned credentials.'
+          'ENG/2012/0001 is the designated Initial Super Administrator identity and has already been provisioned. Please sign in through Portal Sign In with your credentials.'
         ELSE
-          'ENG/2012/0001 is the designated Initial Super Administrator identity and is exempt from Group 11 patient self-registration. This account cannot be auto-created here; complete secure server-side administrator provisioning first, then sign in via Portal Sign In.'
+          'ENG/2012/0001 is recognised as the designated Initial Super Administrator identity. Complete the Initial Super Administrator registration form below to provision your account securely.'
       END
     );
   END IF;

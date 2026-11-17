@@ -13,6 +13,12 @@ interface AuthContextValue {
   verifyMatric: (matricNumber: string) => Promise<MatricVerificationResult>;
   login: (identifier: string, password: string) => Promise<AuthUser>;
   register: (payload: Record<string, unknown>) => Promise<AuthUser>;
+  registerSuperAdmin: (payload: {
+    full_name: string;
+    email: string;
+    password: string;
+    phone?: string;
+  }) => Promise<{ user: AuthUser | null; message: string }>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<string>;
   updateRecoveryPassword: (newPassword: string) => Promise<string>;
@@ -491,6 +497,67 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [useSupabase, authMode]
   );
 
+  const registerSuperAdmin = useCallback(
+    async (payload: {
+      full_name: string;
+      email: string;
+      password: string;
+      phone?: string;
+    }): Promise<{ user: AuthUser | null; message: string }> => {
+      if (authMode === 'unconfigured') {
+        throw new Error(
+          'Production Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+        );
+      }
+
+      const fullName = payload.full_name.trim();
+      const email = payload.email.trim().toLowerCase();
+      const password = payload.password;
+      const phone = payload.phone ? payload.phone.trim() : undefined;
+
+      const res = await fetch('/api/admin/provision-super-admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          matric_number: 'ENG/2012/0001',
+          login_username: 'ENG/2012/0001',
+          role: 'super_admin',
+          full_name: fullName,
+          email,
+          password,
+          phone,
+        }),
+      });
+
+      const body = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        login_username?: string;
+      };
+      if (!res.ok || !body.ok) {
+        throw new Error(
+          body.error || `Super Administrator provisioning failed with status ${res.status}.`
+        );
+      }
+
+      try {
+        const signedIn = await login('ENG/2012/0001', password);
+        return {
+          user: signedIn,
+          message: 'Initial Super Administrator account created and signed in.',
+        };
+      } catch {
+        return {
+          user: null,
+          message:
+            'Initial Super Administrator account (ENG/2012/0001) has been created. Please sign in via Portal Sign In.',
+        };
+      }
+    },
+    [authMode, login]
+  );
+
   const logout = useCallback(async () => {
     if (useSupabase && supabase) {
       await supabase.auth.signOut();
@@ -568,6 +635,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         verifyMatric,
         login,
         register,
+        registerSuperAdmin,
         logout,
         resetPassword,
         updateRecoveryPassword,

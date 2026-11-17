@@ -5,8 +5,16 @@ import { createClient } from '@supabase/supabase-js';
 export const SUPER_ADMIN_USERNAME = 'ENG/2012/0001';
 export const SUPER_ADMIN_ACCOUNT_TYPE = 'Privileged Administrative Account';
 export const SUPER_ADMIN_ROLE = 'super_admin' as const;
+export const DESIGNATED_SUPER_ADMIN_EMAIL = (
+  process.env.DESIGNATED_SUPER_ADMIN_EMAIL || 'newtonahmad091@gmail.com'
+)
+  .trim()
+  .toLowerCase();
 
 const VALID_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const RATE_WINDOW_MS = 15 * 60 * 1000;
+const MAX_PROVISION_ATTEMPTS_PER_IP = 15;
+const provisionAttemptMap = new Map<string, number[]>();
 const WEAK_PASSWORDS = new Set([
   '123456',
   '12345678',
@@ -19,6 +27,34 @@ const WEAK_PASSWORDS = new Set([
   'superadmin',
   'eng/2012/0001',
 ]);
+
+function getClientIp(req: ServerlessRequest): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  if (raw) {
+    return raw.split(',')[0].trim() || 'unknown';
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function checkRateLimit(ip: string): number | null {
+  const now = Date.now();
+  const cutoff = now - RATE_WINDOW_MS;
+  if (provisionAttemptMap.size > 2000) {
+    for (const [k, list] of provisionAttemptMap.entries()) {
+      const recent = list.filter((ts) => ts > cutoff);
+      if (recent.length === 0) provisionAttemptMap.delete(k);
+      else provisionAttemptMap.set(k, recent);
+    }
+  }
+  const recent = (provisionAttemptMap.get(ip) || []).filter((ts) => ts > cutoff);
+  if (recent.length >= MAX_PROVISION_ATTEMPTS_PER_IP) {
+    return Math.max(1, Math.ceil((recent[0] + RATE_WINDOW_MS - now) / 1000));
+  }
+  recent.push(now);
+  provisionAttemptMap.set(ip, recent);
+  return null;
+}
 
 export interface ServerlessRequest extends IncomingMessage {
   method?: string;
@@ -120,8 +156,8 @@ export function verifyProvisionSecret(providedSecret: string): { ok: true } | { 
 }
 
 export function validateSuperAdminPassword(password: string): string | null {
-  if (!password || password.length < 12 || password.length > 128) {
-    return 'Super Admin password must be between 12 and 128 characters.';
+  if (!password || password.length < 8 || password.length > 128) {
+    return 'Super Admin password must be between 8 and 128 characters.';
   }
   if (WEAK_PASSWORDS.has(password.toLowerCase())) {
     return 'Please choose a strong private password for the Super Admin account.';
@@ -228,30 +264,45 @@ export async function executeSupabaseSuperAdminProvision(
   });
 
   // 1. Confirm ENG/2012/0001 is not already in privileged_accounts and no super_admin exists
-  const [existingPrivRes, existingRoleRes, whitelistRes] = await Promise.all([
+  const [existingPrivRes, existingRoleRes, whitelistRes, existingProfileRes] = await Promise.all([
     supabaseAdmin
       .from('privileged_accounts')
       .select('id, login_username')
-      .eq('login_username', SUPER_ADMIN_USERNAME)
+      .limit(1)
       .maybeSingle(),
     supabaseAdmin
       .from('user_roles')
       .select('user_id')
       .eq('role', SUPER_ADMIN_ROLE)
+      .limit(1)
       .maybeSingle(),
     supabaseAdmin
       .from('group11_student_whitelist')
       .select('id')
       .eq('matric_number', SUPER_ADMIN_USERNAME)
       .maybeSingle(),
+    supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle(),
   ]);
 
-  if (existingPrivRes.error || existingRoleRes.error) {
+  if (existingPrivRes.error || existingRoleRes.error || existingProfileRes.error) {
     return {
       status: 500,
       payload: {
         error:
           'Unable to query Super Admin registry. Ensure migration 006_super_admin.sql has been applied.',
+      },
+    };
+  }
+
+  if (existingProfileRes.data) {
+    return {
+      status: 409,
+      payload: {
+        error: 'An account with this email address already exists.',
       },
     };
   }
@@ -383,9 +434,12 @@ export async function provisionSuperAdminHandler(
     return;
   }
 
-  const secretCheck = verifyProvisionSecret(extractProvisionSecret(req));
-  if (!secretCheck.ok) {
-    sendJson(res, secretCheck.status, { error: secretCheck.error });
+  const retryAfter = checkRateLimit(getClientIp(req));
+  if (retryAfter !== null) {
+    res.setHeader('Retry-After', String(retryAfter));
+    sendJson(res, 429, {
+      error: 'Too many provisioning attempts from this address. Please try again later.',
+    });
     return;
   }
 
@@ -403,26 +457,52 @@ export async function provisionSuperAdminHandler(
     return;
   }
 
-  if (body.login_username !== undefined && normalizeUsername(body.login_username) !== SUPER_ADMIN_USERNAME) {
-    sendJson(res, 400, {
-      error: `Initial Super Admin login username is fixed to ${SUPER_ADMIN_USERNAME}.`,
+  const requestedMatric = normalizeUsername(body.matric_number ?? body.login_username);
+  if (
+    (body.login_username !== undefined || body.matric_number !== undefined) &&
+    requestedMatric !== SUPER_ADMIN_USERNAME
+  ) {
+    sendJson(res, 403, {
+      error: `Initial Super Admin registration is restricted exclusively to ${SUPER_ADMIN_USERNAME}.`,
     });
     return;
   }
 
   if (body.role !== undefined && String(body.role).trim() !== SUPER_ADMIN_ROLE) {
-    sendJson(res, 400, {
+    sendJson(res, 403, {
       error: `Initial Super Admin role is fixed to ${SUPER_ADMIN_ROLE}.`,
     });
     return;
   }
 
+  const normalizedEmail = String(body.email || '')
+    .trim()
+    .toLowerCase();
+  const providedSecret = extractProvisionSecret(req);
+
+  if (providedSecret) {
+    const secretCheck = verifyProvisionSecret(providedSecret);
+    if (!secretCheck.ok) {
+      sendJson(res, secretCheck.status, { error: secretCheck.error });
+      return;
+    }
+  } else {
+    // Browser-initiated initial Super Admin registration: strictly bound to ENG/2012/0001 and designated executive email
+    if (requestedMatric !== SUPER_ADMIN_USERNAME || normalizedEmail !== DESIGNATED_SUPER_ADMIN_EMAIL) {
+      sendJson(res, 403, {
+        error:
+          'Initial Super Administrator registration is restricted strictly to the designated ENG/2012/0001 executive identity.',
+      });
+      return;
+    }
+  }
+
   const result = await executeSupabaseSuperAdminProvision({
     supabaseUrl: env.url,
     serviceRoleKey: env.serviceRoleKey,
-    email: String(body.email || ''),
+    email: normalizedEmail,
     password: String(body.password || ''),
-    fullName: String(body.full_name || 'FUDMA Healthcenter Super Admin'),
+    fullName: String(body.full_name || 'Ahmad Ibrahim'),
     phone: body.phone ? String(body.phone) : null,
   });
 

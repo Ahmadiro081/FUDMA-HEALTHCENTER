@@ -17,6 +17,7 @@ import {
 } from './server/db.ts';
 import { provisionSupabaseStaff } from './api/admin/staff.ts';
 import {
+  DESIGNATED_SUPER_ADMIN_EMAIL,
   SUPER_ADMIN_ACCOUNT_TYPE,
   SUPER_ADMIN_ROLE,
   SUPER_ADMIN_USERNAME,
@@ -435,17 +436,18 @@ async function startServer(): Promise<void> {
         (entry) => normalizeMatricNumber(entry.login_username) === normMatric
       );
     if (isPrivilegedSuperAdmin) {
-      const isProvisioned = db.privileged_accounts.some(
-        (entry) => normalizeMatricNumber(entry.login_username) === normMatric
-      );
+      const isProvisioned =
+        db.privileged_accounts.some(
+          (entry) => normalizeMatricNumber(entry.login_username) === normMatric
+        ) || db.users.some((u) => u.role === 'super_admin');
       res.json({
         ok: false,
         code: 'PRIVILEGED_SUPER_ADMIN',
         matric_number: normMatric,
         is_provisioned: isProvisioned,
         message: isProvisioned
-          ? `${SUPER_ADMIN_USERNAME} is the designated Initial Super Administrator identity and is exempt from Group 11 patient registration. Please sign in through Portal Sign In with your provisioned credentials.`
-          : `${SUPER_ADMIN_USERNAME} is the designated Initial Super Administrator identity and is exempt from Group 11 patient self-registration. This account cannot be auto-created here; complete secure server-side administrator provisioning first, then sign in via Portal Sign In.`,
+          ? `${SUPER_ADMIN_USERNAME} is the designated Initial Super Administrator identity and has already been provisioned. Please sign in through Portal Sign In with your credentials.`
+          : `${SUPER_ADMIN_USERNAME} is recognised as the designated Initial Super Administrator identity. Complete the Initial Super Administrator registration form below to provision your account securely.`,
       });
       return;
     }
@@ -2354,12 +2356,25 @@ async function startServer(): Promise<void> {
   // ADMINISTRATOR & SUPER ADMIN ROUTES
   // =========================================================================
 
-  app.all('/api/admin/provision-super-admin', (req: Request, res: Response, next: NextFunction) => {
-    const hasSupabaseEnv = Boolean(
-      (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim() &&
-        (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
-    );
-    if (!LOCAL_JSON_ENABLED || hasSupabaseEnv) {
+  app.all('/api/admin/provision-super-admin', registerLimiter, (req: Request, res: Response, next: NextFunction) => {
+    const sbUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+    const sbKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+    let hasValidSupabaseEnv = false;
+    if (
+      sbUrl &&
+      sbKey &&
+      sbKey.length >= 20 &&
+      !sbUrl.includes('your-project-id') &&
+      !sbKey.includes('your-service-role')
+    ) {
+      try {
+        const parsed = new URL(sbUrl);
+        hasValidSupabaseEnv = parsed.protocol === 'https:' || parsed.protocol === 'http:';
+      } catch {
+        hasValidSupabaseEnv = false;
+      }
+    }
+    if (!LOCAL_JSON_ENABLED || hasValidSupabaseEnv) {
       void provisionSuperAdminHandler(req, res).catch(next);
       return;
     }
@@ -2374,35 +2389,47 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const secretCheck = verifyProvisionSecret(extractProvisionSecret(req));
-    if (!secretCheck.ok) {
-      res.status(secretCheck.status).json({ error: secretCheck.error });
-      return;
-    }
-
     const body = (req.body ?? {}) as Record<string, unknown>;
+    const requestedMatric = normalizeMatricNumber(body.matric_number ?? body.login_username);
     if (
-      body.login_username !== undefined &&
-      normalizeMatricNumber(body.login_username) !== SUPER_ADMIN_USERNAME
+      (body.login_username !== undefined || body.matric_number !== undefined) &&
+      requestedMatric !== SUPER_ADMIN_USERNAME
     ) {
-      res.status(400).json({
-        error: `Initial Super Admin login username is fixed to ${SUPER_ADMIN_USERNAME}.`,
+      res.status(403).json({
+        error: `Initial Super Admin registration is restricted exclusively to ${SUPER_ADMIN_USERNAME}.`,
       });
       return;
     }
     if (body.role !== undefined && String(body.role).trim() !== SUPER_ADMIN_ROLE) {
-      res.status(400).json({
+      res.status(403).json({
         error: `Initial Super Admin role is fixed to ${SUPER_ADMIN_ROLE}.`,
       });
       return;
     }
 
-    const fullName = String(body.full_name || 'FUDMA Healthcenter Super Admin').trim();
+    const fullName = String(body.full_name || 'Ahmad Ibrahim').trim();
     const email = String(body.email || '')
       .trim()
       .toLowerCase();
     const password = String(body.password || '');
     const phone = body.phone ? String(body.phone).trim() : null;
+
+    const providedSecret = extractProvisionSecret(req);
+    if (providedSecret) {
+      const secretCheck = verifyProvisionSecret(providedSecret);
+      if (!secretCheck.ok) {
+        res.status(secretCheck.status).json({ error: secretCheck.error });
+        return;
+      }
+    } else {
+      if (requestedMatric !== SUPER_ADMIN_USERNAME || email !== DESIGNATED_SUPER_ADMIN_EMAIL) {
+        res.status(403).json({
+          error:
+            'Initial Super Administrator registration is restricted strictly to the designated ENG/2012/0001 executive identity.',
+        });
+        return;
+      }
+    }
 
     if (!fullName || !email || !password) {
       res.status(400).json({ error: 'Full name, institutional email, and private password are required.' });
@@ -2430,9 +2457,7 @@ async function startServer(): Promise<void> {
       return;
     }
     if (
-      db.privileged_accounts.some(
-        (entry) => normalizeMatricNumber(entry.login_username) === SUPER_ADMIN_USERNAME
-      ) ||
+      db.privileged_accounts.length > 0 ||
       db.users.some((u) => u.role === 'super_admin')
     ) {
       res.status(409).json({
