@@ -1,0 +1,6 @@
+{
+  "name": "FUDMA HEALTHCENTER",
+  "description": "Hospital Appointment Booking and Patient Management System for Federal University Dutsin-Ma.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
