@@ -685,8 +685,13 @@ async function startServer(): Promise<void> {
       req.body?.identifier ?? req.body?.email ?? req.body?.matric_number ?? ''
     ).trim();
     const password = String(req.body?.password ?? '');
+    const adminOnly = req.body?.admin_only === true;
     if (!rawIdentifier || !password) {
-      res.status(400).json({ error: 'Matriculation number (or email) and password are required.' });
+      res.status(400).json({
+        error: adminOnly
+          ? 'Administrator email (or username) and password are required.'
+          : 'Matriculation number (or email) and password are required.',
+      });
       return;
     }
 
@@ -709,6 +714,11 @@ async function startServer(): Promise<void> {
       if (priv) {
         user = db.users.find((u) => u.id === priv.user_id && u.role === 'super_admin');
         matchedPrivilegedUsername = priv.login_username;
+      } else if (adminOnly) {
+        res.status(401).json({
+          error: 'Access denied. No authorized Super Administrator account matches those credentials.',
+        });
+        return;
       } else if (normMatric === SUPER_ADMIN_USERNAME) {
         res.status(403).json({
           error:
@@ -729,14 +739,20 @@ async function startServer(): Promise<void> {
       res.status(401).json({
         error: isEmail
           ? 'Invalid email or password.'
-          : matchedPrivilegedUsername
-            ? 'Invalid login username or password.'
+          : matchedPrivilegedUsername || adminOnly
+            ? 'Invalid administrator username or password.'
             : 'Invalid matriculation number or password.',
       });
       return;
     }
     if (!user.is_active) {
       res.status(403).json({ error: 'This account has been deactivated by an administrator.' });
+      return;
+    }
+    if (adminOnly && user.role !== 'super_admin') {
+      res.status(403).json({
+        error: 'Access denied. Only authorized Super Administrator accounts may sign in here.',
+      });
       return;
     }
     if (isDisallowedDemoUserInProd(user)) {

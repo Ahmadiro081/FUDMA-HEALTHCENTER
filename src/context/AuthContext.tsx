@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { api, getStoredToken, setStoredToken } from '../lib/api';
 import { hasAnySupabaseConfig, isSupabaseConfigured, supabase } from '../lib/supabase';
@@ -12,6 +12,7 @@ interface AuthContextValue {
   recoveryMode: boolean;
   verifyMatric: (matricNumber: string) => Promise<MatricVerificationResult>;
   login: (identifier: string, password: string) => Promise<AuthUser>;
+  loginAdmin: (identifier: string, password: string) => Promise<AuthUser>;
   register: (payload: Record<string, unknown>) => Promise<AuthUser>;
   registerSuperAdmin: (payload: {
     full_name: string;
@@ -179,6 +180,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [recoveryMode, setRecoveryMode] = useState<boolean>(() => useSupabase && hasRecoveryUrlHint());
+  const verifyingAdminRef = useRef<boolean>(false);
 
   const refreshUser = useCallback(async () => {
     if (useSupabase && supabase) {
@@ -280,6 +282,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       data: { subscription },
     } = sb.auth.onAuthStateChange((event, nextSession) => {
       if (!mounted) return;
+      if (verifyingAdminRef.current) {
+        return;
+      }
       setSession(nextSession);
 
       if (event === 'PASSWORD_RECOVERY') {
@@ -416,6 +421,129 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       const res = await api.auth.login(trimmedIdentifier, password);
+      setStoredToken(res.token);
+      setUser(res.user);
+      return res.user;
+    },
+    [useSupabase, authMode]
+  );
+
+  const loginAdmin = useCallback(
+    async (identifier: string, password: string): Promise<AuthUser> => {
+      const trimmedIdentifier = identifier.trim();
+      if (!trimmedIdentifier || !password) {
+        throw new Error('Administrator email (or username) and password are required.');
+      }
+
+      if (useSupabase && supabase) {
+        verifyingAdminRef.current = true;
+        try {
+          let activeSession: Session | null = null;
+
+          if (trimmedIdentifier.includes('@')) {
+            const { data, error } = await supabase.auth.signInWithPassword({
+              email: trimmedIdentifier.toLowerCase(),
+              password,
+            });
+            if (error || !data.session) {
+              throw new Error(error?.message || 'Unable to sign in with Supabase.');
+            }
+            activeSession = data.session;
+          } else {
+            // Admin username login resolves strictly against privileged_accounts (never Group 11 student whitelist)
+            const res = await fetch('/api/auth/login-matric', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                identifier: trimmedIdentifier,
+                password,
+                admin_only: true,
+              }),
+            });
+            const body = (await res.json().catch(() => ({}))) as {
+              error?: string;
+              session?: { access_token?: string; refresh_token?: string };
+            };
+            if (!res.ok || !body.session?.access_token || !body.session?.refresh_token) {
+              throw new Error(body.error || 'Invalid administrator username or password.');
+            }
+            const { data: sessData, error: sessErr } = await supabase.auth.setSession({
+              access_token: body.session.access_token,
+              refresh_token: body.session.refresh_token,
+            });
+            if (sessErr || !sessData.session) {
+              throw new Error(
+                sessErr?.message || 'Unable to establish authenticated Supabase session.'
+              );
+            }
+            activeSession = sessData.session;
+          }
+
+          const hydrated = await hydrateSupabaseUser(activeSession);
+          if (!hydrated) {
+            await supabase.auth.signOut();
+            setSession(null);
+            setUser(null);
+            setStoredToken(null);
+            throw new Error('Unable to verify administrator profile from database.');
+          }
+          if (!hydrated.is_active) {
+            await supabase.auth.signOut();
+            setSession(null);
+            setUser(null);
+            setStoredToken(null);
+            throw new Error('This administrator account has been deactivated.');
+          }
+          if (hydrated.role !== 'super_admin') {
+            await supabase.auth.signOut();
+            setSession(null);
+            setUser(null);
+            setStoredToken(null);
+            throw new Error(
+              'Access denied. Only authorized Super Administrator accounts may sign in to the Administrative Portal.'
+            );
+          }
+
+          if (trimmedIdentifier.includes('@')) {
+            try {
+              await supabase.from('activity_logs').insert({
+                actor_id: hydrated.id,
+                actor_name: hydrated.full_name,
+                actor_role: 'super_admin',
+                action: 'SUPER_ADMIN_LOGIN',
+                entity_type: 'privileged_account',
+                entity_id: hydrated.email,
+                details: 'Super Admin authenticated via /admin-login.',
+              });
+            } catch {
+              // Audit failure must not block active verified Super Admin sign-in
+            }
+          }
+
+          setSession(activeSession);
+          setStoredToken(null);
+          setRecoveryMode(false);
+          setUser(hydrated);
+          return hydrated;
+        } finally {
+          verifyingAdminRef.current = false;
+        }
+      }
+
+      if (authMode === 'unconfigured') {
+        throw new Error(
+          'Production Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+        );
+      }
+
+      const res = await api.auth.login(trimmedIdentifier, password, true);
+      if (res.user.role !== 'super_admin' || !res.user.is_active) {
+        setStoredToken(null);
+        setUser(null);
+        throw new Error(
+          'Access denied. Only authorized Super Administrator accounts may sign in to the Administrative Portal.'
+        );
+      }
       setStoredToken(res.token);
       setUser(res.user);
       return res.user;
@@ -644,6 +772,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         recoveryMode,
         verifyMatric,
         login,
+        loginAdmin,
         register,
         registerSuperAdmin,
         logout,

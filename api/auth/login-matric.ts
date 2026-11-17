@@ -185,10 +185,13 @@ export async function loginWithMatricOrEmail(
     body.identifier ?? body.email ?? body.matric_number ?? ''
   ).trim();
   const password = String(body.password ?? '');
+  const adminOnly = body.admin_only === true;
 
   if (!rawIdentifier || !password) {
     sendJson(res, 400, {
-      error: 'Matriculation number (or email) and password are required.',
+      error: adminOnly
+        ? 'Administrator email (or username) and password are required.'
+        : 'Matriculation number (or email) and password are required.',
     });
     return;
   }
@@ -293,6 +296,12 @@ export async function loginWithMatricOrEmail(
         login_username: String(privRow.login_username),
         full_name: String(profRes.data.full_name || 'Super Administrator'),
       };
+    } else if (adminOnly) {
+      // Dedicated admin login must never fall back to the Group 11 student whitelist
+      sendJson(res, 401, {
+        error: 'Access denied. No authorized Super Administrator account matches those credentials.',
+      });
+      return;
     } else if (normMatric === SUPER_ADMIN_USERNAME) {
       sendJson(res, 403, {
         error:
@@ -354,14 +363,14 @@ export async function loginWithMatricOrEmail(
     sendJson(res, 401, {
       error: isEmailLogin
         ? 'Invalid email or password.'
-        : privilegedAccount
-          ? 'Invalid login username or password.'
+        : privilegedAccount || adminOnly
+          ? 'Invalid administrator username or password.'
           : 'Invalid matriculation number or password.',
     });
     return;
   }
 
-  // Verify activation state and record Super Admin login audit event
+  // Verify activation state, enforce adminOnly role guard, and record Super Admin login audit event
   if (privilegedAccount) {
     await supabaseAdmin
       .from('activity_logs')
@@ -392,6 +401,12 @@ export async function loginWithMatricOrEmail(
       sendJson(res, 403, { error: 'This account has been deactivated by an administrator.' });
       return;
     }
+    if (adminOnly && (roleRes.error || roleRes.data?.role !== 'super_admin')) {
+      sendJson(res, 403, {
+        error: 'Access denied. Only authorized Super Administrator accounts may sign in here.',
+      });
+      return;
+    }
     if (roleRes.data?.role === 'super_admin') {
       await supabaseAdmin
         .from('activity_logs')
@@ -406,6 +421,11 @@ export async function loginWithMatricOrEmail(
         })
         .then(() => {}, () => {});
     }
+  } else if (adminOnly) {
+    sendJson(res, 403, {
+      error: 'Access denied. Only authorized Super Administrator accounts may sign in here.',
+    });
+    return;
   }
 
   sendJson(res, 200, {

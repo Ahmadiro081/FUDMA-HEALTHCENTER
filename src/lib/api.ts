@@ -124,10 +124,15 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    login: (identifier: string, password: string) =>
+    login: (identifier: string, password: string, adminOnly = false) =>
       localRequest<{ token: string; user: AuthUser }>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ identifier, email: identifier, password }),
+        body: JSON.stringify({
+          identifier,
+          email: identifier,
+          password,
+          ...(adminOnly ? { admin_only: true } : {}),
+        }),
       }),
     logout: () => localRequest<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
     me: () => localRequest<{ user: AuthUser }>('/api/auth/me'),

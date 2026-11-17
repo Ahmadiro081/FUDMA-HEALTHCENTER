@@ -190,6 +190,12 @@ export function LoginPage() {
                 <span>Staff Access Help</span>
               </button>
             </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-600">Super Administrator governance?</span>
+              <Link to="/admin-login" className="font-semibold text-[#0F4C81] hover:underline whitespace-nowrap shrink-0">
+                Admin Login
+              </Link>
+            </div>
           </div>
         </div>
 
