@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { api, getStoredToken, setStoredToken } from '../lib/api';
-import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import { hasAnySupabaseConfig, isSupabaseConfigured, supabase } from '../lib/supabase';
 import type { AuthUser, DoctorRecord, MatricVerificationResult, PatientRecord, UserRole } from '../types/hospital';
 
 interface AuthContextValue {
@@ -18,6 +18,7 @@ interface AuthContextValue {
     email: string;
     password: string;
     phone?: string;
+    provision_secret: string;
   }) => Promise<{ user: AuthUser | null; message: string }>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<string>;
@@ -170,7 +171,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const useSupabase = isSupabaseConfigured() && Boolean(supabase);
   const authMode: AuthContextValue['authMode'] = useSupabase
     ? 'supabase'
-    : import.meta.env.PROD
+    : import.meta.env.PROD || hasAnySupabaseConfig()
       ? 'unconfigured'
       : 'local';
 
@@ -503,6 +504,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       email: string;
       password: string;
       phone?: string;
+      provision_secret: string;
     }): Promise<{ user: AuthUser | null; message: string }> => {
       if (authMode === 'unconfigured') {
         throw new Error(
@@ -514,10 +516,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const email = payload.email.trim().toLowerCase();
       const password = payload.password;
       const phone = payload.phone ? payload.phone.trim() : undefined;
+      const provisionSecret = payload.provision_secret.trim();
+
+      if (!provisionSecret) {
+        throw new Error('Super Admin provisioning authorization secret is required.');
+      }
 
       const res = await fetch('/api/admin/provision-super-admin', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-provision-secret': provisionSecret,
+        },
         credentials: 'include',
         body: JSON.stringify({
           matric_number: 'ENG/2012/0001',

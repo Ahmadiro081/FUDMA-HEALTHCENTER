@@ -126,9 +126,27 @@ export function extractProvisionSecret(req: ServerlessRequest): string {
   return '';
 }
 
+const PLACEHOLDER_PROVISION_SECRETS = new Set([
+  'change-this-to-a-long-random-string',
+  'your-super-admin-provision-secret',
+  'super-admin-secret',
+  'fudma-healthcenter-secret',
+]);
+
 export function verifyProvisionSecret(providedSecret: string): { ok: true } | { ok: false; status: number; error: string } {
+  if (!providedSecret) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Valid Super Admin provisioning authorization secret is required.',
+    };
+  }
   const configuredSecret = (process.env.SUPER_ADMIN_PROVISION_SECRET || '').trim();
-  if (!configuredSecret || configuredSecret.length < 24) {
+  if (
+    !configuredSecret ||
+    configuredSecret.length < 24 ||
+    PLACEHOLDER_PROVISION_SECRETS.has(configuredSecret.toLowerCase())
+  ) {
     return {
       ok: false,
       status: 503,
@@ -136,16 +154,10 @@ export function verifyProvisionSecret(providedSecret: string): { ok: true } | { 
         'Secure Super Admin provisioning is disabled. Configure SUPER_ADMIN_PROVISION_SECRET (at least 24 random characters) on the server.',
     };
   }
-  if (!providedSecret) {
-    return {
-      ok: false,
-      status: 403,
-      error: 'Valid provisioning authorization secret is required.',
-    };
-  }
-  const providedBuf = Buffer.from(providedSecret, 'utf-8');
-  const expectedBuf = Buffer.from(configuredSecret, 'utf-8');
-  if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+  // Hash both secrets with SHA-256 so buffer lengths are constant before timingSafeEqual
+  const providedHash = crypto.createHash('sha256').update(providedSecret, 'utf8').digest();
+  const expectedHash = crypto.createHash('sha256').update(configuredSecret, 'utf8').digest();
+  if (!crypto.timingSafeEqual(providedHash, expectedHash)) {
     return {
       ok: false,
       status: 403,
@@ -481,6 +493,13 @@ export async function provisionSuperAdminHandler(
     return;
   }
 
+  const providedSecret = extractProvisionSecret(req);
+  const secretCheck = verifyProvisionSecret(providedSecret);
+  if (!secretCheck.ok) {
+    sendJson(res, secretCheck.status, { error: secretCheck.error });
+    return;
+  }
+
   const env = resolveSupabaseAdminEnv();
   if (!env.ok) {
     sendJson(res, 503, { error: env.error });
@@ -516,24 +535,6 @@ export async function provisionSuperAdminHandler(
   const normalizedEmail = String(body.email || '')
     .trim()
     .toLowerCase();
-  const providedSecret = extractProvisionSecret(req);
-
-  if (providedSecret) {
-    const secretCheck = verifyProvisionSecret(providedSecret);
-    if (!secretCheck.ok) {
-      sendJson(res, secretCheck.status, { error: secretCheck.error });
-      return;
-    }
-  } else {
-    // Browser-initiated initial Super Admin registration: strictly bound to ENG/2012/0001 and designated executive email
-    if (requestedMatric !== SUPER_ADMIN_USERNAME || normalizedEmail !== DESIGNATED_SUPER_ADMIN_EMAIL) {
-      sendJson(res, 403, {
-        error:
-          'Initial Super Administrator registration is restricted strictly to the designated ENG/2012/0001 executive identity.',
-      });
-      return;
-    }
-  }
 
   const result = await executeSupabaseSuperAdminProvision({
     supabaseUrl: env.url,

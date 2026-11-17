@@ -13,6 +13,12 @@ export function isSupabaseConfigured(): boolean {
   );
 }
 
+export function hasAnySupabaseConfig(): boolean {
+  const hasUrl = Boolean(supabaseUrl && !supabaseUrl.includes('your-project-id'));
+  const hasKey = Boolean(supabaseAnonKey && !supabaseAnonKey.includes('your-public-supabase-anon-key'));
+  return hasUrl || hasKey;
+}
+
 export function getSupabaseConfigStatus(): {
   configured: boolean;
   missingKeys: string[];

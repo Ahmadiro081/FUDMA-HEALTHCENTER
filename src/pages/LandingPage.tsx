@@ -68,8 +68,14 @@ export function LandingPage() {
   const [imgErrors, setImgErrors] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    api.reference.departments().then((r) => setDepartments(r.departments)).catch(() => {});
-    api.reference.publicSettings().then((r) => setSettings(r.settings)).catch(() => {});
+    api.reference
+      .departments()
+      .then((r) => setDepartments(Array.isArray(r?.departments) ? r.departments : []))
+      .catch(() => {});
+    api.reference
+      .publicSettings()
+      .then((r) => setSettings(r?.settings ?? null))
+      .catch(() => {});
   }, []);
 
   const markImgError = (key: string) => {
@@ -188,7 +194,7 @@ export function LandingPage() {
                 <span>Clinical Units</span>
               </div>
               <p className="mt-1.5 text-sm font-semibold text-slate-900 tabular-nums">
-                {departments.length || 5} Integrated Hospital Departments
+                {(Array.isArray(departments) && departments.length) || 5} Integrated Hospital Departments
               </p>
             </div>
             <div className="rounded-lg border border-slate-200 bg-white p-4">
@@ -358,7 +364,7 @@ export function LandingPage() {
           </div>
 
           <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-            {departments
+            {(Array.isArray(departments) ? departments : [])
               .filter((d) => d.is_active)
               .map((dept) => (
                 <div key={dept.id} className="rounded-lg border border-slate-200 bg-white p-5">

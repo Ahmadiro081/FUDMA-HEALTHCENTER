@@ -360,6 +360,7 @@ export function RegisterPage() {
     email: 'ahmadcybro@gmail.com',
     password: '',
     confirm_password: '',
+    provision_secret: '',
   });
   const [showSuperAdminPass, setShowSuperAdminPass] = useState(false);
 
@@ -477,6 +478,10 @@ export function RegisterPage() {
       setError('Passwords do not match.');
       return;
     }
+    if (!superAdminForm.provision_secret.trim()) {
+      setError('Server Super Admin provisioning secret is required.');
+      return;
+    }
 
     setSubmitting(true);
     setVerificationNotice('');
@@ -485,6 +490,7 @@ export function RegisterPage() {
         full_name: superAdminForm.full_name.trim(),
         email: superAdminForm.email.trim().toLowerCase(),
         password: superAdminForm.password,
+        provision_secret: superAdminForm.provision_secret.trim(),
       });
       if (outcome.user) {
         showToast(`Welcome, ${outcome.user.full_name} (Super Administrator)`, 'success');
@@ -813,6 +819,23 @@ export function RegisterPage() {
                     placeholder="Re-enter password"
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#0369A1] focus:outline-none"
                   />
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor="sa-provision-secret" className="block text-xs font-semibold text-slate-700 mb-1">
+                    Provisioning Authorization Secret *
+                  </label>
+                  <input
+                    id="sa-provision-secret"
+                    type="password"
+                    required
+                    value={superAdminForm.provision_secret}
+                    onChange={(e) => handleSuperAdminChange('provision_secret', e.target.value)}
+                    placeholder="Enter server SUPER_ADMIN_PROVISION_SECRET"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono focus:border-[#0369A1] focus:outline-none"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Validated server-side against <code>SUPER_ADMIN_PROVISION_SECRET</code> before Super Admin creation.
+                  </p>
                 </div>
               </div>
 

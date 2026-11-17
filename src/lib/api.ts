@@ -1,4 +1,4 @@
-import { isSupabaseConfigured } from './supabase';
+import { hasAnySupabaseConfig, isSupabaseConfigured } from './supabase';
 import { supabaseApi } from './supabaseApi';
 import type {
   ActivityLog,
@@ -51,6 +51,11 @@ function assertLocalDevAllowed(): void {
   if (isSupabaseConfigured()) {
     throw new Error('Express local API is bypassed while Supabase backend is active.');
   }
+  if (hasAnySupabaseConfig()) {
+    throw new Error(
+      'Incomplete Supabase configuration detected. Set both VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY; local JSON fallback is disabled.'
+    );
+  }
   if (import.meta.env.PROD) {
     throw new Error(
       'Production Supabase configuration missing. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY; local JSON fallback is disabled in production.'
@@ -75,9 +80,32 @@ async function localRequest<T>(path: string, options: RequestInit = {}): Promise
     credentials: 'include',
   });
 
-  const data = await res.json().catch(() => ({}));
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed && typeof parsed === 'object') {
+        data = parsed as Record<string, unknown>;
+      } else if (res.ok) {
+        throw new Error(`Unexpected response payload from ${path}.`);
+      }
+    } catch (parseErr) {
+      if (res.ok) {
+        throw parseErr instanceof Error
+          ? parseErr
+          : new Error(`Unexpected non-JSON response from ${path} (${contentType || 'unknown'}).`);
+      }
+    }
+  } else if (res.ok) {
+    throw new Error(`Empty response received from ${path}.`);
+  }
+
   if (!res.ok) {
-    throw new Error(data.error || `Request failed with status ${res.status}`);
+    throw new Error(
+      (typeof data.error === 'string' && data.error) || `Request failed with status ${res.status}`
+    );
   }
   return data as T;
 }

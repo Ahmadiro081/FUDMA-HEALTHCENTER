@@ -5,6 +5,7 @@ import {
   SUPER_ADMIN_USERNAME,
   executeSupabaseSuperAdminProvision,
   validateSuperAdminPassword,
+  verifyProvisionSecret,
 } from '../api/admin/provision-super-admin.ts';
 
 dotenv.config();
@@ -77,6 +78,16 @@ async function main(): Promise<void> {
   console.log(`Account Type   : ${SUPER_ADMIN_ACCOUNT_TYPE}`);
   console.log('Role           : super_admin');
   console.log('');
+
+  const providedProvisionSecret = process.stdin.isTTY
+    ? (await promptLine('Enter SUPER_ADMIN_PROVISION_SECRET: ', true)).trim()
+    : (process.env.PROVISION_SECRET || process.env.SUPER_ADMIN_PROVISION_SECRET_INPUT || '').trim();
+
+  const secretCheck = verifyProvisionSecret(providedProvisionSecret);
+  if (!secretCheck.ok) {
+    console.error(`ERROR: ${secretCheck.error}`);
+    process.exit(1);
+  }
 
   const email =
     process.env.SUPER_ADMIN_EMAIL?.trim() ||

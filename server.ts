@@ -18,14 +18,8 @@ import {
 import { provisionSupabaseStaff } from './api/admin/staff.ts';
 import { provisionSupabaseStudent } from './api/admin/students.ts';
 import {
-  DESIGNATED_SUPER_ADMIN_EMAIL,
-  SUPER_ADMIN_ACCOUNT_TYPE,
-  SUPER_ADMIN_ROLE,
   SUPER_ADMIN_USERNAME,
-  extractProvisionSecret,
   provisionSuperAdminHandler,
-  validateSuperAdminPassword,
-  verifyProvisionSecret,
 } from './api/admin/provision-super-admin.ts';
 import { loginWithMatricOrEmail } from './api/auth/login-matric.ts';
 import type {
@@ -38,10 +32,41 @@ import type {
 
 dotenv.config();
 
+function isConfiguredSupabaseUrl(val: string | undefined): boolean {
+  const trimmed = (val || '').trim();
+  if (!trimmed || trimmed.includes('your-project-id')) return false;
+  return /^https?:\/\//i.test(trimmed);
+}
+
+function isConfiguredSupabaseKey(val: string | undefined): boolean {
+  const trimmed = (val || '').trim();
+  if (!trimmed || trimmed.length < 20) return false;
+  if (
+    trimmed.includes('your-public-supabase-anon-key') ||
+    trimmed.includes('your-service-role')
+  ) {
+    return false;
+  }
+  return true;
+}
+
 const PORT = Number(process.env.PORT || 3000);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const ALLOW_LOCAL_JSON_IN_PROD = process.env.ALLOW_LOCAL_JSON_DEMO === 'true';
-const LOCAL_JSON_ENABLED = !IS_PRODUCTION || ALLOW_LOCAL_JSON_IN_PROD;
+const IS_EXPLICIT_DEV = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
+const ALLOW_LOCAL_JSON_DEMO = process.env.ALLOW_LOCAL_JSON_DEMO === 'true';
+const DISABLE_LOCAL_JSON_DEMO = process.env.ALLOW_LOCAL_JSON_DEMO === 'false';
+const HAS_ANY_SUPABASE_CONFIG =
+  isConfiguredSupabaseUrl(process.env.SUPABASE_URL) ||
+  isConfiguredSupabaseUrl(process.env.VITE_SUPABASE_URL) ||
+  isConfiguredSupabaseKey(process.env.VITE_SUPABASE_ANON_KEY) ||
+  isConfiguredSupabaseKey(process.env.SUPABASE_ANON_KEY) ||
+  isConfiguredSupabaseKey(process.env.SUPABASE_SERVICE_ROLE_KEY);
+const LOCAL_JSON_ENABLED =
+  !IS_PRODUCTION &&
+  !HAS_ANY_SUPABASE_CONFIG &&
+  !DISABLE_LOCAL_JSON_DEMO &&
+  (ALLOW_LOCAL_JSON_DEMO || IS_EXPLICIT_DEV);
+
 const PLACEHOLDER_SECRETS = new Set([
   'change-this-to-a-long-random-string-in-production',
   'fudma-healthcenter-dev-secret-key-2026',
@@ -156,10 +181,9 @@ interface AuthedRequest extends Request {
 }
 
 function isDisallowedDemoUserInProd(user: StoredUser): boolean {
-  if (!IS_PRODUCTION) return false;
+  if (!IS_PRODUCTION && !HAS_ANY_SUPABASE_CONFIG) return false;
   if (DEMO_USER_IDS.has(user.id)) {
-    if (user.role === 'admin') return true;
-    if (verifyPassword('Fudma@2026', user.password_hash)) return true;
+    return true;
   }
   return false;
 }
@@ -357,11 +381,11 @@ async function startServer(): Promise<void> {
     return token.split('.').length === 3;
   }
 
-  // Disable all local JSON hospital routes in production unless explicitly opted into demo mode
+  // Disable all local JSON hospital routes in production or when Supabase is configured
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     if (
-      (req.path === '/admin/staff' && (req.method === 'POST' || req.method === 'OPTIONS')) ||
-      (req.path === '/admin/students' && (req.method === 'POST' || req.method === 'PATCH' || req.method === 'OPTIONS')) ||
+      req.path === '/admin/staff' ||
+      req.path === '/admin/students' ||
       req.path === '/admin/provision-super-admin' ||
       req.path === '/auth/login-matric'
     ) {
@@ -370,7 +394,9 @@ async function startServer(): Promise<void> {
     }
     if (!LOCAL_JSON_ENABLED) {
       res.status(503).json({
-        error: 'Local JSON storage is disabled in production. Configure Supabase environment variables.',
+        error: HAS_ANY_SUPABASE_CONFIG
+          ? 'Local JSON endpoints are disabled while Supabase mode is configured.'
+          : 'Local JSON storage is disabled. Configure Supabase environment variables or explicitly enable local demo mode in non-production.',
       });
       return;
     }
@@ -2332,7 +2358,8 @@ async function startServer(): Promise<void> {
       return;
     }
     const isOwner = notif.recipient_user_id === user.id;
-    const isAuthorizedRole = notif.recipient_role !== null && notif.recipient_role === user.role;
+    const isAuthorizedRole =
+      notif.recipient_user_id === null && notif.recipient_role !== null && notif.recipient_role === user.role;
     if (!isOwner && !isAuthorizedRole) {
       res.status(403).json({ error: 'You do not have permission to update this notification.' });
       return;
@@ -2346,7 +2373,7 @@ async function startServer(): Promise<void> {
     const db = loadDb();
     const user = req.currentUser!;
     for (const n of db.notifications) {
-      if (n.recipient_user_id === user.id || (n.recipient_role && n.recipient_role === user.role)) {
+      if (n.recipient_user_id === user.id || (n.recipient_user_id === null && n.recipient_role === user.role)) {
         n.is_read = true;
       }
     }
@@ -2359,164 +2386,8 @@ async function startServer(): Promise<void> {
   // =========================================================================
 
   app.all('/api/admin/provision-super-admin', registerLimiter, (req: Request, res: Response, next: NextFunction) => {
-    const sbUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
-    const sbKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
-    let hasValidSupabaseEnv = false;
-    if (
-      sbUrl &&
-      sbKey &&
-      sbKey.length >= 20 &&
-      !sbUrl.includes('your-project-id') &&
-      !sbKey.includes('your-service-role')
-    ) {
-      try {
-        const parsed = new URL(sbUrl);
-        hasValidSupabaseEnv = parsed.protocol === 'https:' || parsed.protocol === 'http:';
-      } catch {
-        hasValidSupabaseEnv = false;
-      }
-    }
-    if (!LOCAL_JSON_ENABLED || hasValidSupabaseEnv) {
-      void provisionSuperAdminHandler(req, res).catch(next);
-      return;
-    }
-
-    if (req.method === 'OPTIONS') {
-      res.statusCode = 204;
-      res.end();
-      return;
-    }
-    if (req.method !== 'POST') {
-      res.status(405).json({ error: 'Method not allowed. Use POST.' });
-      return;
-    }
-
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const requestedMatric = normalizeMatricNumber(body.matric_number ?? body.login_username);
-    if (
-      (body.login_username !== undefined || body.matric_number !== undefined) &&
-      requestedMatric !== SUPER_ADMIN_USERNAME
-    ) {
-      res.status(403).json({
-        error: `Initial Super Admin registration is restricted exclusively to ${SUPER_ADMIN_USERNAME}.`,
-      });
-      return;
-    }
-    if (body.role !== undefined && String(body.role).trim() !== SUPER_ADMIN_ROLE) {
-      res.status(403).json({
-        error: `Initial Super Admin role is fixed to ${SUPER_ADMIN_ROLE}.`,
-      });
-      return;
-    }
-
-    const fullName = String(body.full_name || 'Ahmad Ibrahim').trim();
-    const email = String(body.email || '')
-      .trim()
-      .toLowerCase();
-    const password = String(body.password || '');
-    const phone = body.phone ? String(body.phone).trim() : null;
-
-    const providedSecret = extractProvisionSecret(req);
-    if (providedSecret) {
-      const secretCheck = verifyProvisionSecret(providedSecret);
-      if (!secretCheck.ok) {
-        res.status(secretCheck.status).json({ error: secretCheck.error });
-        return;
-      }
-    } else {
-      if (requestedMatric !== SUPER_ADMIN_USERNAME || email !== DESIGNATED_SUPER_ADMIN_EMAIL) {
-        res.status(403).json({
-          error:
-            'Initial Super Administrator registration is restricted strictly to the designated ENG/2012/0001 executive identity.',
-        });
-        return;
-      }
-    }
-
-    if (!fullName || !email || !password) {
-      res.status(400).json({ error: 'Full name, institutional email, and private password are required.' });
-      return;
-    }
-    if (!VALID_EMAIL_REGEX.test(email)) {
-      res.status(400).json({ error: 'Please provide a valid institutional email address.' });
-      return;
-    }
-    const passErr = validateSuperAdminPassword(password);
-    if (passErr) {
-      res.status(400).json({ error: passErr });
-      return;
-    }
-
-    const db = loadDb();
-    if (
-      db.group11_student_whitelist.some(
-        (entry) => normalizeMatricNumber(entry.matric_number) === SUPER_ADMIN_USERNAME
-      )
-    ) {
-      res.status(409).json({
-        error: `${SUPER_ADMIN_USERNAME} must never exist in group11_student_whitelist.`,
-      });
-      return;
-    }
-    if (
-      db.privileged_accounts.length > 0 ||
-      db.users.some((u) => u.role === 'super_admin')
-    ) {
-      res.status(409).json({
-        error: `Super Admin (${SUPER_ADMIN_USERNAME}) has already been provisioned and cannot be duplicated or overwritten.`,
-      });
-      return;
-    }
-    if (db.users.some((u) => u.email.toLowerCase() === email)) {
-      res.status(409).json({ error: 'An account with this institutional email already exists.' });
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const userId = crypto.randomUUID();
-    const superAdminUser: StoredUser = {
-      id: userId,
-      full_name: fullName,
-      email,
-      phone,
-      gender: null,
-      date_of_birth: null,
-      address: 'FUDMA Healthcenter Executive Administration',
-      is_active: true,
-      role: 'super_admin',
-      password_hash: hashPassword(password),
-      created_at: now,
-      updated_at: now,
-    };
-
-    db.users.unshift(superAdminUser);
-    db.privileged_accounts.push({
-      id: crypto.randomUUID(),
-      user_id: userId,
-      login_username: SUPER_ADMIN_USERNAME,
-      role: 'super_admin',
-      account_type: SUPER_ADMIN_ACCOUNT_TYPE,
-      is_immutable: true,
-      created_at: now,
-    });
-    addActivityLog(db, {
-      actor_id: userId,
-      actor_name: fullName,
-      actor_role: 'super_admin',
-      action: 'SUPER_ADMIN_PROVISIONED',
-      entity_type: 'privileged_account',
-      entity_id: SUPER_ADMIN_USERNAME,
-      details: `Initial Privileged Administrative Account (${SUPER_ADMIN_USERNAME}) provisioned via secure server-side workflow.`,
-    });
-    saveDb(db);
-
-    res.status(201).json({
-      ok: true,
-      user_id: userId,
-      login_username: SUPER_ADMIN_USERNAME,
-      role: SUPER_ADMIN_ROLE,
-      account_type: SUPER_ADMIN_ACCOUNT_TYPE,
-    });
+    // Super Admin provisioning is exclusively handled via Supabase Admin API + DB finalization RPC; never write to local JSON
+    void provisionSuperAdminHandler(req, res).catch(next);
   });
 
   app.get('/api/admin/overview', requireAuth, requireRole('admin', 'super_admin'), (_req: AuthedRequest, res: Response) => {
@@ -2586,14 +2457,11 @@ async function startServer(): Promise<void> {
   });
 
   app.all('/api/admin/students', (req: AuthedRequest, res: Response, next: NextFunction) => {
-    const hasSupabaseJwt = isSupabaseBearerToken(req);
-    const hasLocalHmac = Boolean(
-      getTokenFromRequest(req) && verifyToken(getTokenFromRequest(req) as string)
-    );
     if (
-      hasSupabaseJwt ||
+      HAS_ANY_SUPABASE_CONFIG ||
+      IS_PRODUCTION ||
       !LOCAL_JSON_ENABLED ||
-      (Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) && !hasLocalHmac)
+      isSupabaseBearerToken(req)
     ) {
       void provisionSupabaseStudent(req, res).catch(next);
       return;
@@ -2835,17 +2703,25 @@ async function startServer(): Promise<void> {
     });
   });
 
-  app.post('/api/admin/staff', (req: AuthedRequest, res: Response, next: NextFunction) => {
-    const hasSupabaseJwt = isSupabaseBearerToken(req);
-    const hasLocalHmac = Boolean(
-      getTokenFromRequest(req) && verifyToken(getTokenFromRequest(req) as string)
-    );
+  app.all('/api/admin/staff', (req: AuthedRequest, res: Response, next: NextFunction) => {
     if (
-      hasSupabaseJwt ||
+      HAS_ANY_SUPABASE_CONFIG ||
+      IS_PRODUCTION ||
       !LOCAL_JSON_ENABLED ||
-      (Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) && !hasLocalHmac)
+      isSupabaseBearerToken(req)
     ) {
       void provisionSupabaseStaff(req, res).catch(next);
+      return;
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method not allowed. Use POST.' });
       return;
     }
 
@@ -3125,7 +3001,7 @@ async function startServer(): Promise<void> {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -862,14 +862,36 @@ export const supabaseApi = {
 
     async markRead(id: string): Promise<{ ok: boolean }> {
       const client = requireSupabase();
-      const { error } = await client.from('notifications').update({ is_read: true }).eq('id', id);
+      const actor = await getCurrentActor();
+      const uuidOk = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actor.id);
+      const validRoles: UserRole[] = ['patient', 'nurse', 'lab', 'pharmacy', 'doctor', 'admin', 'super_admin'];
+      if (!uuidOk || !validRoles.includes(actor.role)) {
+        throw new Error('Unable to verify authorized notification recipient scope.');
+      }
+      const scopeFilter = `recipient_user_id.eq.${actor.id},and(recipient_user_id.is.null,recipient_role.eq.${actor.role})`;
+      const { error } = await client
+        .from('notifications')
+        .update({ is_read: true })
+        .eq('id', id)
+        .or(scopeFilter);
       if (error) throw formatSupabaseError(error, 'Failed to mark notification as read.');
       return { ok: true };
     },
 
     async markAllRead(): Promise<{ ok: boolean }> {
       const client = requireSupabase();
-      const { error } = await client.from('notifications').update({ is_read: true }).eq('is_read', false);
+      const actor = await getCurrentActor();
+      const uuidOk = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actor.id);
+      const validRoles: UserRole[] = ['patient', 'nurse', 'lab', 'pharmacy', 'doctor', 'admin', 'super_admin'];
+      if (!uuidOk || !validRoles.includes(actor.role)) {
+        throw new Error('Unable to verify authorized notification recipient scope.');
+      }
+      const scopeFilter = `recipient_user_id.eq.${actor.id},and(recipient_user_id.is.null,recipient_role.eq.${actor.role})`;
+      const { error } = await client
+        .from('notifications')
+        .update({ is_read: true })
+        .eq('is_read', false)
+        .or(scopeFilter);
       if (error) throw formatSupabaseError(error, 'Failed to mark notifications as read.');
       return { ok: true };
     },
